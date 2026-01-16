@@ -318,7 +318,7 @@ pub enum Opcode {
     /// VSF: {cb}
     rgb,
 
-    /// Pop t, color_b, color_a; push interpolated u32 RGBA
+    /// Pop t, colour_b, colour_a; push interpolated u32 RGBA
     /// VSF: {ci}
     color_lerp,
 

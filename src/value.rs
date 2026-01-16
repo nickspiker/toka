@@ -41,7 +41,7 @@ pub enum Value {
     U8(u8),
     /// 16-bit unsigned integer (VSF type: u4)
     U16(u16),
-    /// 32-bit unsigned integer (VSF type: u5) - used for colors, indices
+    /// 32-bit unsigned integer (VSF type: u5) - used for colours, indices
     U32(u32),
     /// 64-bit unsigned integer (VSF type: u6)
     U64(u64),

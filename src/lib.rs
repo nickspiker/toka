@@ -86,6 +86,9 @@ pub mod vm;
 /// Canvas rendering backend
 pub mod canvas;
 
+/// Bytecode builder with chainable opcode methods
+pub mod builder;
+
 /// Placeholder module for future bytecode parser
 pub mod bytecode {
     //! VSF bytecode parser (not yet implemented)

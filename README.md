@@ -4,7 +4,7 @@
   <h3>Capability-Bounded Stack VM for Secure Distributed Computing</h3>
 </div>
 
-**Status:** v0.0 - Early Development
+**Status:** v0.0.0 - Foundation Complete
 
 ## Overview
 
@@ -37,7 +37,7 @@ VSF Capsule (signed bytecode)
   ↓ Verify ed25519 signature
   ↓ Parse bytecode
   ↓ Grant declared capabilities
-Rune VM Execution
+Toka VM Execution
   ↓ Stack operations
   ↓ Spirix arithmetic
   ↓ Capability-checked I/O
@@ -84,7 +84,7 @@ VSF File:
 
 ### Value Types
 
-Rune supports these stack value types:
+Toka supports these stack value types:
 
 | Type | Description | Size | Range |
 |------|-------------|------|-------|
@@ -318,7 +318,7 @@ All external resources accessed via **handles** (opaque u64 IDs):
 
 ### No Linear Memory
 
-Rune has **no linear memory model**. Only handles.
+Toka has **no linear memory model**. Only handles.
 
 **This eliminates:**
 - Buffer overflows
@@ -352,12 +352,12 @@ wasm-pack build --target web --out-dir www/pkg
 
 **Usage:**
 ```javascript
-import init, { RuneVM } from './pkg/rune.js';
+import init, { TokaVM } from './pkg/toka.js';
 
 await init();
 const canvas = document.getElementById('canvas');
 const bytecode = new Uint8Array([/* VSF capsule */]);
-const vm = new RuneVM(canvas, bytecode);
+const vm = new TokaVM(canvas, bytecode);
 
 // Run 1000 instructions per frame
 function animate() {
@@ -392,23 +392,22 @@ animate();
 ### Project Structure
 
 ```
-rune/
+toka/
 ├── src/
-│   ├── lib.rs          # WASM entry point, public API
-│   ├── main.rs         # Native CLI runner (testing)
+│   ├── lib.rs          # Public API
+│   ├── builder.rs      # Rust DSL for bytecode generation
 │   ├── value.rs        # Value type system
-│   ├── stack.rs        # Stack implementation
-│   ├── instruction.rs  # Instruction enum + decoder
+│   ├── opcode.rs       # Opcode definitions
 │   ├── vm.rs           # VM executor
-│   ├── canvas.rs       # Canvas backend (WASM + native)
-│   ├── bytecode.rs     # VSF bytecode parser
-│   └── error.rs        # Error types
-├── www/
-│   ├── index.html      # WASM test harness
-│   └── pkg/            # wasm-pack output
+│   ├── canvas.rs       # Canvas backend (AARRGGBB format)
+│   ├── bytecode.rs     # VSF bytecode parser (future)
+│   └── capability.rs   # Capability system (future)
+├── examples/
+│   └── builder_demo.rs # Builder API examples
 ├── Cargo.toml
-├── OPCODES.md          # Full instruction reference
-├── SCAFFOLD.md         # Architecture overview
+├── OPCODES.md          # Full opcode reference
+├── BUILDER.md          # Rust builder API documentation
+├── SUMMARY.md          # v0.0.0 implementation summary
 └── README.md           # This file
 ```
 
@@ -460,9 +459,75 @@ python3 -m http.server 8000
 - Known bytecode → expected shapes/colors
 - Performance benchmarks
 
+## Writing Toka Programs
+
+### Rust Builder (Type-Safe DSL)
+
+Toka provides a **chainable Rust API** for building bytecode programs with compile-time safety:
+
+```rust
+use toka::builder::Program;
+use toka::vm::VM;
+
+// Compute 2 + 3 = 5
+let bytecode = Program::new()
+    .po()   // push_one → [1]
+    .dp()   // dup → [1, 1]
+    .ad()   // add → [2]
+    .po()   // push_one → [2, 1]
+    .po()   // push_one → [2, 1, 1]
+    .ad()   // add → [2, 2]
+    .po()   // push_one → [2, 2, 1]
+    .ad()   // add → [2, 3]
+    .ad()   // add → [5]
+    .hl()   // halt
+    .build();
+
+let mut vm = VM::new(bytecode);
+vm.run().unwrap();
+```
+
+**Method names use two-letter mnemonics matching opcodes:**
+- `.po()` = push_one
+- `.ad()` = add
+- `.fr()` = fill_rect
+- `.cb()` = rgb colour
+- `.hl()` = halt
+
+**Benefits:**
+- ✅ **Compile-time safety** - Rust catches errors before running
+- ✅ **Zero overhead** - Direct bytecode emission, no parsing
+- ✅ **IDE support** - Autocomplete, documentation, refactoring
+- ✅ **Composable** - Build helper functions for common patterns
+- ✅ **Type-safe** - VSF encoding handled automatically
+
+See [BUILDER.md](BUILDER.md) for complete API documentation.
+
+### Example: Drawing (Future)
+
+```rust
+// Once VSF decoder is implemented in VM:
+Program::new()
+    .po().pz().pz().cb()     // red colour (1.0, 0.0, 0.0)
+    .ps_s44(0.25)            // x = 25%
+    .ps_s44(0.25)            // y = 25%
+    .ps_s44(0.5)             // width = 50%
+    .ps_s44(0.5)             // height = 50%
+    .fr()                    // fill_rect
+    .hl()                    // halt
+    .build()
+```
+
+### Run Examples
+
+```bash
+cargo run --example builder_demo
+cargo test --lib builder
+```
+
 ## Comparison with Other VMs
 
-| Feature | WASM | JVM | Rune |
+| Feature | WASM | JVM | Toka |
 |---------|------|-----|------|
 | Arithmetic | IEEE-754 f32/f64 | IEEE-754 float/double | Spirix S44 (deterministic) |
 | Memory Model | Linear memory | Garbage collected heap | Handle-only (no pointers) |
@@ -512,42 +577,172 @@ python3 -m http.server 8000
 
 ## Roadmap
 
-**v0.0 (Current)** - Portal MVP
-- [x] Architecture design
-- [x] Opcode specification
-- [ ] VSF bytecode format
-- [ ] Stack VM implementation
-- [ ] Canvas 2D backend (WASM)
-- [ ] Basic instruction set (~30 ops)
-- [ ] Demo: Colorful shapes in browser
+### v0.0.0 (Complete ✅) - Foundation
 
-**v0.0** - Expanded Instructions
-- [ ] Comparison operators
+**Rust Builder DSL:**
+- ✅ Complete builder API with 50+ opcodes
+- ✅ Chainable methods (`.po()`, `.ad()`, `.fr()`, etc.)
+- ✅ VSF encoding for S44, u32, strings
+- ✅ Type-safe bytecode generation
+- ✅ Full API documentation ([BUILDER.md](BUILDER.md))
+
+**VM Core:**
+- ✅ Stack-based execution engine
+- ✅ Spirix S44 arithmetic (ScalarF4E4)
+- ✅ Basic opcodes (stack, arithmetic, comparison, logic)
+- ✅ Colour utilities (rgb, rgba)
+- ✅ Canvas rendering (AARRGGBB format)
+
+**Testing:**
+- ✅ 19 unit tests passing
+- ✅ VM integration tests
+- ✅ Builder examples (builder_demo.rs)
+
+### v0.0.1 - VSF Integration
+
+**VM Enhancements:**
+- [ ] VSF value decoder for `push` opcode
+- [ ] Full drawing operations (fill_rect, fill_circle, etc.)
+- [ ] Jump/branch helpers with labels
+- [ ] Control flow (jm, ji, jz opcodes)
+
+**Builder Improvements:**
+- [ ] Label system for readable jump targets
+- [ ] Helper functions for common patterns
+- [ ] `toka!` macro for terser syntax
+
+**Testing:**
+- [ ] Drawing tests with canvas verification
+- [ ] Control flow integration tests
+- [ ] Example programs (shapes, animations)
+
+### v0.1 - Expanded Instruction Set
+
+**Arithmetic:**
+- [ ] Trigonometry (sin, cos, tan, atan2)
+- [ ] More math (floor, ceil, round, sqrt, power)
+- [ ] Interpolation (lerp, smoothstep)
+- [ ] Clamping and range operations
+
+**Drawing:**
+- [ ] Text rendering (draw_text)
+- [ ] Stroke operations (stroke_rect, stroke_circle)
+- [ ] Line drawing
+- [ ] Advanced colour operations (interpolation)
+
+**Control Flow:**
 - [ ] Function calls (call/return)
-- [ ] More arithmetic (trig, sqrt, pow)
-- [ ] More drawing (ellipse, paths, transforms)
-- [ ] VSF capsule parsing
+- [ ] Local variables (allocate, load, store)
+- [ ] Conditional execution
 
-**v0.2** - Security & I/O
+### v0.2 - Security & Verification
+
+**Cryptography:**
 - [ ] BLAKE3 hash verification
 - [ ] ed25519 signature checking
-- [ ] Capability enforcement
-- [ ] Arrays and strings
+- [ ] VSF capsule format
+- [ ] Signed bytecode validation
+
+**Capability System:**
+- [ ] Capability declaration/enforcement
+- [ ] Handle-based resource access
+- [ ] Canvas capability
+- [ ] File/network capability stubs
+
+**Safety:**
+- [ ] Stack depth limits
+- [ ] Execution step limits
+- [ ] Memory bounds checking
+
+### v0.3 - Full Feature Set
+
+**Advanced Types:**
+- [ ] Arrays and collections
+- [ ] String operations
 - [ ] Memory buffers (via handles)
+- [ ] Complex data structures
 
-**v0.3** - Full Instruction Set
-- [ ] All 153 instructions
-- [ ] Error handling (try/catch)
-- [ ] Cryptography ops
-- [ ] Time operations
-- [ ] Module system (import/export)
+**Error Handling:**
+- [ ] Try/catch opcodes
+- [ ] Error value propagation
+- [ ] Stack unwinding
+- [ ] Debug introspection
 
-**v0.x+** - Nautilus Integration
-- [ ] Native browser implementation
-- [ ] Spirix GPU backend (HIP kernels)
+**Module System:**
+- [ ] Import/export declarations
+- [ ] Multi-file programs
+- [ ] Shared libraries
+- [ ] Version compatibility
+
+### v0.4 - AOT Compiler Pipeline
+
+**Three-Stage Architecture:**
+
+1. **Development (Runtime Checks):**
+   - Builder API with full type checking
+   - Runtime validation for safety
+   - Fast iteration cycle
+   - Excellent error messages
+
+2. **Distribution (VSF Bytecode):**
+   - Portable capsule format
+   - Cryptographic signatures
+   - Platform-independent
+   - Same bytecode everywhere
+
+3. **Production (Native Compilation):**
+   - AOT compile VSF → native code
+   - Type safety proved at compile time
+   - Zero runtime checks (stripped)
+   - Maximum performance
+
+**Compiler Features:**
+- [ ] VSF → native code generator
+- [ ] Type inference and checking
+- [ ] Dead code elimination
+- [ ] Constant propagation
+- [ ] Inlining and optimization
+- [ ] Native binary output
+
+**Performance:**
+- Development: ~100-500M ops/sec (interpreted)
+- Production: ~5-10B ops/sec (native compiled)
+- 10-20× speedup over interpreted mode
+
+### v0.5 - WASM Target
+
+**Browser Integration:**
+- [ ] wasm-pack build support
+- [ ] JavaScript bindings
+- [ ] Canvas 2D API integration
+- [ ] HTML5 Canvas rendering
+- [ ] Browser performance optimization
+
+**WASM Features:**
+- [ ] Spirix arithmetic in WASM
+- [ ] VSF bytecode loading
+- [ ] Frame-rate animation support
+- [ ] Input event handling
+
+### v0.x+ - Nautilus Integration
+
+**Native Browser:**
+- [ ] Spirix GPU backend (HIP/CUDA kernels)
+- [ ] Hardware S44 acceleration
+- [ ] Direct frame buffer access
+- [ ] Zero-copy rendering
+
+**Distributed Computing:**
 - [ ] FGTW network integration
-- [ ] Photon transport
+- [ ] Photon transport protocol
+- [ ] P2P capsule distribution
 - [ ] Hardware capability enforcement
+
+**Performance:**
+- S44 operations → GPU ALU (single cycle)
+- Viewport coords → GPU transform (parallel)
+- Canvas ops → Frame buffer (DMA)
+- No IEEE-754 anywhere in pipeline
 
 ## Related Projects
 
@@ -560,11 +755,7 @@ python3 -m http.server 8000
 
 ## License
 
-Custom open-source (see LICENSE):
-- Free for any purpose (including commercial use)
-- Modify and distribute freely
-- Patent grant included
-- Cannot sell Rune itself as standalone product
+Dual-licensed under MIT or Apache-2.0, at your option.
 
 Hardware implementation rights reserved - contact for licensing.
 
@@ -581,8 +772,8 @@ Nick Spiker <nick@verichrome.cc>
 
 ---
 
-**Status:** Early development. Not production-ready. API will change.
+**Status:** v0.0.0 foundation complete. Builder API stable. VM in active development.
 
-**Contribute:** Issues and PRs welcome at https://github.com/fractaldecoder/rune (when public)
+**Current Focus:** Implementing VSF decoder for `push` opcode to enable drawing operations.
 
-**Learn More:** https://holdmyoscilloscope.com/rune/
+**Contribute:** Issues and PRs welcome at https://github.com/nickspiker/toka

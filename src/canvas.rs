@@ -16,7 +16,7 @@ pub struct Canvas {
     /// Height in pixels
     height: usize,
 
-    /// Pixel buffer (RGBA, row-major)
+    /// Pixel buffer (AARRGGBB, row-major)
     pixels: Vec<u32>,
 }
 
@@ -26,17 +26,17 @@ impl Canvas {
         Self {
             width,
             height,
-            pixels: vec![0xFF000000; width * height], // Black with full alpha
+            pixels: vec![0xFF000000; width * height], // Opaque black (AARRGGBB)
         }
     }
 
-    /// Clear entire canvas to a color
-    pub fn clear(&mut self, color: u32) {
-        self.pixels.fill(color);
+    /// Clear entire canvas to a colour
+    pub fn clear(&mut self, colour: u32) {
+        self.pixels.fill(colour);
     }
 
     /// Fill a rectangle (viewport coordinates 0.0-1.0)
-    pub fn fill_rect(&mut self, x: ScalarF4E4, y: ScalarF4E4, w: ScalarF4E4, h: ScalarF4E4, color: u32) {
+    pub fn fill_rect(&mut self, x: ScalarF4E4, y: ScalarF4E4, w: ScalarF4E4, h: ScalarF4E4, colour: u32) {
         // Convert viewport coords to pixel coords
         let px = self.vp_to_px_x(x);
         let py = self.vp_to_px_y(y);
@@ -53,31 +53,31 @@ impl Canvas {
         for row in y1..y2 {
             for col in x1..x2 {
                 let idx = (row as usize) * self.width + (col as usize);
-                self.pixels[idx] = color;
+                self.pixels[idx] = colour;
             }
         }
     }
 
     /// Draw a single pixel (viewport coordinates)
-    pub fn draw_pixel(&mut self, x: ScalarF4E4, y: ScalarF4E4, color: u32) {
+    pub fn draw_pixel(&mut self, x: ScalarF4E4, y: ScalarF4E4, colour: u32) {
         let px = self.vp_to_px_x(x);
         let py = self.vp_to_px_y(y);
 
         if px >= 0 && px < self.width as i32 && py >= 0 && py < self.height as i32 {
             let idx = (py as usize) * self.width + (px as usize);
-            self.pixels[idx] = color;
+            self.pixels[idx] = colour;
         }
     }
 
-    /// Draw text (basic rasterization - for v0, we'll just draw colored blocks)
+    /// Draw text (basic rasterization - for v0, we'll just draw coloured blocks)
     /// In a real implementation, this would use a font renderer
-    pub fn draw_text(&mut self, x: ScalarF4E4, y: ScalarF4E4, size: ScalarF4E4, text: &str, color: u32) {
-        // For v0: Draw a colored rectangle representing text
+    pub fn draw_text(&mut self, x: ScalarF4E4, y: ScalarF4E4, size: ScalarF4E4, text: &str, colour: u32) {
+        // For v0: Draw a coloured rectangle representing text
         // Height is based on size, width is proportional to text length
         let char_width = size * ScalarF4E4::from(0.6); // Approximate aspect ratio
         let text_width = char_width * ScalarF4E4::from(text.len() as f64);
 
-        self.fill_rect(x, y, text_width, size, color);
+        self.fill_rect(x, y, text_width, size, colour);
     }
 
     /// Convert viewport X coordinate to pixel coordinate
@@ -143,7 +143,7 @@ mod tests {
     #[test]
     fn test_clear() {
         let mut canvas = Canvas::new(10, 10);
-        canvas.clear(0xFFFF0000); // Red
+        canvas.clear(0xFFFF0000); // Opaque red (AARRGGBB)
 
         assert!(canvas.pixels().iter().all(|&p| p == 0xFFFF0000));
     }
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn test_fill_rect() {
         let mut canvas = Canvas::new(100, 100);
-        canvas.clear(0xFF000000); // Black
+        canvas.clear(0xFF000000); // Opaque black (AARRGGBB)
 
         // Fill center quarter with white
         let x = ScalarF4E4::from(0.25);
@@ -159,7 +159,7 @@ mod tests {
         let w = ScalarF4E4::from(0.5);
         let h = ScalarF4E4::from(0.5);
 
-        canvas.fill_rect(x, y, w, h, 0xFFFFFFFF);
+        canvas.fill_rect(x, y, w, h, 0xFFFFFFFF); // Opaque white (AARRGGBB)
 
         // Check center pixel is white
         let center = 50 * 100 + 50;

@@ -168,23 +168,23 @@ impl VM {
 
             // Drawing operations (viewport coordinates 0.0-1.0)
             Opcode::clear => {
-                let color = self.stack.pop()
+                let colour = self.stack.pop()
                     .ok_or_else(|| "Stack underflow on clear".to_string())?
                     .to_u32()?;
-                self.canvas.clear(color);
+                self.canvas.clear(colour);
             }
 
             Opcode::fill_rect => {
-                let color = self.stack.pop().ok_or("Stack underflow")?.to_u32()?;
+                let colour = self.stack.pop().ok_or("Stack underflow")?.to_u32()?;
                 let h = self.pop_s44()?;
                 let w = self.pop_s44()?;
                 let y = self.pop_s44()?;
                 let x = self.pop_s44()?;
-                self.canvas.fill_rect(x, y, w, h, color);
+                self.canvas.fill_rect(x, y, w, h, colour);
             }
 
             Opcode::draw_text => {
-                let color = self.stack.pop().ok_or("Stack underflow")?.to_u32()?;
+                let colour = self.stack.pop().ok_or("Stack underflow")?.to_u32()?;
                 let size = self.pop_s44()?;
                 let y = self.pop_s44()?;
                 let x = self.pop_s44()?;
@@ -192,10 +192,10 @@ impl VM {
                     Value::String(s) => s,
                     _ => return Err("draw_text requires string".to_string()),
                 };
-                self.canvas.draw_text(x, y, size, &text, color);
+                self.canvas.draw_text(x, y, size, &text, colour);
             }
 
-            // Color utilities
+            // Colour utilities
             Opcode::rgba => {
                 let a = self.pop_s44()?;
                 let b = self.pop_s44()?;
@@ -208,8 +208,9 @@ impl VM {
                 let b8 = (Into::<f64>::into(b).clamp(0.0, 1.0) * 255.0) as u32;
                 let a8 = (Into::<f64>::into(a).clamp(0.0, 1.0) * 255.0) as u32;
 
-                let color = (a8 << 24) | (r8 << 16) | (g8 << 8) | b8;
-                self.stack.push(Value::U32(color));
+                // AARRGGBB format
+                let colour = (a8 << 24) | (r8 << 16) | (g8 << 8) | b8;
+                self.stack.push(Value::U32(colour));
             }
 
             Opcode::rgb => {
@@ -217,13 +218,14 @@ impl VM {
                 let g = self.pop_s44()?;
                 let r = self.pop_s44()?;
 
-                // Convert 0.0-1.0 to 0-255, alpha = 1.0
+                // Convert 0.0-1.0 to 0-255, alpha = 255
                 let r8 = (Into::<f64>::into(r).clamp(0.0, 1.0) * 255.0) as u32;
                 let g8 = (Into::<f64>::into(g).clamp(0.0, 1.0) * 255.0) as u32;
                 let b8 = (Into::<f64>::into(b).clamp(0.0, 1.0) * 255.0) as u32;
 
-                let color = 0xFF000000 | (r8 << 16) | (g8 << 8) | b8;
-                self.stack.push(Value::U32(color));
+                // AARRGGBB format with full alpha
+                let colour = 0xFF000000 | (r8 << 16) | (g8 << 8) | b8;
+                self.stack.push(Value::U32(colour));
             }
 
             // Everything else is not yet implemented
