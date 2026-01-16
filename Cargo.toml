@@ -18,8 +18,8 @@ path = "src/main.rs"
 
 [dependencies]
 # Core dependencies for deterministic computation
-spirix = { path = "../spirix" }
-vsf = { path = "../vsf", default-features = false, features = ["spirix"] }
+spirix = { version = "0.0.6", path = "../spirix" }
+vsf = { version = "0.2.3", path = "../vsf", default-features = false, features = ["spirix"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # wasm-bindgen = "0.2"
