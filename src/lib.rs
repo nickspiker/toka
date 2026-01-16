@@ -80,10 +80,8 @@ pub mod opcode;
 /// Stack value types
 pub mod value;
 
-/// Placeholder module for future VM implementation
-pub mod vm {
-    //! VM execution engine (not yet implemented)
-}
+/// VM execution engine
+pub mod vm;
 
 /// Placeholder module for future bytecode parser
 pub mod bytecode {
