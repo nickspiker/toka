@@ -1,6 +1,6 @@
 [package]
 name = "toka"
-version = "0.0.1"
+version = "0.0.0"
 edition = "2021"
 authors = ["Nick Spiker <nick@verichrome.cc>"]
 description = "Capability-bounded stack VM for secure distributed computing"
@@ -17,3 +17,15 @@ name = "toka"
 path = "src/main.rs"
 
 [dependencies]
+# Core dependencies will be added as we implement features
+# vsf = { path = "../vsf", default-features = false }
+# spirix = { path = "../spirix" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# wasm-bindgen = "0.2"
+# web-sys = { version = "0.3", features = ["CanvasRenderingContext2d", "HtmlCanvasElement"] }
+
+[dev-dependencies]
+
+[features]
+default = []

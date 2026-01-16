@@ -521,7 +521,7 @@ python3 -m http.server 8000
 - [ ] Basic instruction set (~30 ops)
 - [ ] Demo: Colorful shapes in browser
 
-**v0.1** - Expanded Instructions
+**v0.0** - Expanded Instructions
 - [ ] Comparison operators
 - [ ] Function calls (call/return)
 - [ ] More arithmetic (trig, sqrt, pow)
