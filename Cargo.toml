@@ -2,9 +2,9 @@
 name = "toka"
 version = "0.0.0"
 edition = "2021"
-authors = ["Nick Spiker <nick@verichrome.cc>"]
+authors = ["Nick Spiker <fractaldecoder@proton.me>"]
 description = "Capability-bounded stack VM for secure distributed computing"
-repository = "https://github.com/fractaldecoder/toka"
+repository = "https://github.com/nickspiker/toka"
 license = "MIT OR Apache-2.0"
 keywords = ["vm", "capability", "spirix", "vsf", "bytecode"]
 categories = ["no-std", "wasm", "cryptography"]
@@ -17,9 +17,9 @@ name = "toka"
 path = "src/main.rs"
 
 [dependencies]
-# Core dependencies will be added as we implement features
-# vsf = { path = "../vsf", default-features = false }
-# spirix = { path = "../spirix" }
+# Core dependencies for deterministic computation
+spirix = { path = "../spirix" }
+vsf = { path = "../vsf", default-features = false, features = ["spirix"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # wasm-bindgen = "0.2"

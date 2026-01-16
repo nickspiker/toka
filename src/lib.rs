@@ -74,6 +74,12 @@
 /// Toka version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Opcode definitions and parsing
+pub mod opcode;
+
+/// Stack value types
+pub mod value;
+
 /// Placeholder module for future VM implementation
 pub mod vm {
     //! VM execution engine (not yet implemented)
@@ -82,11 +88,6 @@ pub mod vm {
 /// Placeholder module for future bytecode parser
 pub mod bytecode {
     //! VSF bytecode parser (not yet implemented)
-}
-
-/// Placeholder module for future value types
-pub mod value {
-    //! Stack value types (not yet implemented)
 }
 
 /// Placeholder module for future capability system

@@ -1,23 +1,23 @@
-# Rune/Nautilus System Architecture
+# Toka/Nautilus System Architecture
 
 ## Components
 
-**Rune** - Capability-bounded stack VM
+**Toka** - Capability-bounded stack VM
 - Executes VSF-encoded bytecode
 - ~100 instructions (stack, arithmetic, drawing, I/O, control flow)
 - No linear memory, only handles
 - Spirix-native arithmetic
 
 **Capsule** - Signed executable bundle
-- Contains: Rune bytecode + BLAKE3 hash + TOKEN signature
+- Contains: Toka bytecode + VSF serialization
 - Immutable, content-addressed
 - Declares required capabilities
 
 **Nautilus** - Browser/compositor
 - Parses VSF pages
-- Executes Rune capsules
+- Executes Toka capsules
 - Renders via unified compositor (viewport-relative coords)
-- Backends: Canvas (Portal), GPU (native), e-ink
+- Backends: Canvas (Portal), GPU (native), e-ink, print, etc.
 
 **FGTW** - Discovery/attestation network
 - 42-node Byzantine consensus
@@ -25,7 +25,7 @@
 - Stores attestations (handle + route + capsule_hash + timestamp)
 - Latest timestamp wins, TOKEN signature required
 
-**Photon** - P2P transport
+**PT** - Photon Transpart
 - Peer discovery via FGTW
 - Direct UDP connections
 - TOKEN authentication
@@ -43,7 +43,7 @@
 ```
 Developer writes Rust
   → rustc --target ferros-runic
-  → Rune bytecode (VSF)
+  → Toka bytecode (VSF)
   → BLAKE3 hash, TOKEN sign
   → Capsule
   → Publish attestation to FGTW
@@ -52,23 +52,25 @@ Developer writes Rust
 
 **Resolution:**
 ```
-User enters photon://fractaldecoder/calculator
-  → Query FGTW for handle
-  → FGTW returns: peer IPs + latest capsule hash
-  → Fetch page VSF from peer (Photon)
+User enters "free the pizza!"
+  → The plaintext handle is encoded as VSF text and hashed
+  → A 1 second memory hard proof is computed
+  → Query FGTW for handle proof
+  → FGTW returns: peer IPs that host the latest capsule for "free the pizza!"
+  → Fetch page VSF from peer (Photon Transport)
   → Page references capsule by hash
   → Fetch capsule, verify signature
-  → Nautilus executes Rune with capabilities
+  → Nautilus executes Toka with capabilities
   → Compositor renders to viewport
 ```
 
 **Execution:**
 ```
 Capsule loaded
-  → Verify BLAKE3(bytecode) == declared hash
+  → Verify BLAKE3(bytecode, VSF hb type or signature for integrity) == declared hash
   → Verify ed25519(signature, hash, pubkey)
   → Grant declared capabilities
-  → Rune VM interprets instructions
+  → Toka VM interprets instructions
   → Handle I/O capability-checked
   → Drawing ops use viewport fractions
   → Backend rasterizes (Canvas/GPU/e-ink)
@@ -82,6 +84,7 @@ Capsule loaded
 - Handle updates require TOKEN signature
 - FGTW consensus prevents single-node attacks
 - Content-addressing prevents tampering
+- User is notified if handle changed ownership since last visit
 
 ## Coordinates
 
@@ -92,12 +95,11 @@ All layout uses viewport fractions (0.0-1.0):
 
 ## Tech Stack
 
+- Toka - execution
 - VSF - serialization
 - Spirix - arithmetic
+- Photon Transport - delivery with VSF integrity
 - TOKEN - identity
-- BLAKE3 - content addressing
-- ed25519 - signatures
-- Rune - execution
-- Photon - transport
 - FGTW - discovery
 - Nautilus - rendering
+- Photon handle proof style - content addressing

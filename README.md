@@ -33,7 +33,7 @@ Toka is a **stack machine** with:
 
 ```
 VSF Capsule (signed bytecode)
-  ↓ Verify BLAKE3 hash
+  ↓ Verify VSF
   ↓ Verify ed25519 signature
   ↓ Parse bytecode
   ↓ Grant declared capabilities
