@@ -1,0 +1,19 @@
+[package]
+name = "toka"
+version = "0.0.1"
+edition = "2021"
+authors = ["Nick Spiker <nick@verichrome.cc>"]
+description = "Capability-bounded stack VM for secure distributed computing"
+repository = "https://github.com/fractaldecoder/toka"
+license = "MIT OR Apache-2.0"
+keywords = ["vm", "capability", "spirix", "vsf", "bytecode"]
+categories = ["no-std", "wasm", "cryptography"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "toka"
+path = "src/main.rs"
+
+[dependencies]
