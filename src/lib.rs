@@ -83,6 +83,9 @@ pub mod value;
 /// VM execution engine
 pub mod vm;
 
+/// Canvas rendering backend
+pub mod canvas;
+
 /// Placeholder module for future bytecode parser
 pub mod bytecode {
     //! VSF bytecode parser (not yet implemented)

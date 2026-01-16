@@ -6,6 +6,7 @@
 //! - Instruction pointer
 //! - Capability-checked handle system
 
+use crate::canvas::Canvas;
 use crate::opcode::Opcode;
 use crate::value::Value;
 use spirix::ScalarF4E4;
@@ -27,17 +28,26 @@ pub struct VM {
 
     /// Whether execution has halted
     halted: bool,
+
+    /// Canvas for drawing operations
+    canvas: Canvas,
 }
 
 impl VM {
-    /// Create a new VM with the given bytecode
+    /// Create a new VM with the given bytecode and default canvas size (800x600)
     pub fn new(bytecode: Vec<u8>) -> Self {
+        Self::with_canvas(bytecode, 800, 600)
+    }
+
+    /// Create a new VM with the given bytecode and custom canvas size
+    pub fn with_canvas(bytecode: Vec<u8>, width: usize, height: usize) -> Self {
         Self {
             stack: Vec::new(),
             bytecode,
             ip: 0,
             locals: vec![Vec::new()], // Start with one frame
             halted: false,
+            canvas: Canvas::new(width, height),
         }
     }
 
@@ -156,6 +166,66 @@ impl VM {
                 self.halted = true;
             }
 
+            // Drawing operations (viewport coordinates 0.0-1.0)
+            Opcode::clear => {
+                let color = self.stack.pop()
+                    .ok_or_else(|| "Stack underflow on clear".to_string())?
+                    .to_u32()?;
+                self.canvas.clear(color);
+            }
+
+            Opcode::fill_rect => {
+                let color = self.stack.pop().ok_or("Stack underflow")?.to_u32()?;
+                let h = self.pop_s44()?;
+                let w = self.pop_s44()?;
+                let y = self.pop_s44()?;
+                let x = self.pop_s44()?;
+                self.canvas.fill_rect(x, y, w, h, color);
+            }
+
+            Opcode::draw_text => {
+                let color = self.stack.pop().ok_or("Stack underflow")?.to_u32()?;
+                let size = self.pop_s44()?;
+                let y = self.pop_s44()?;
+                let x = self.pop_s44()?;
+                let text = match self.stack.pop().ok_or("Stack underflow")? {
+                    Value::String(s) => s,
+                    _ => return Err("draw_text requires string".to_string()),
+                };
+                self.canvas.draw_text(x, y, size, &text, color);
+            }
+
+            // Color utilities
+            Opcode::rgba => {
+                let a = self.pop_s44()?;
+                let b = self.pop_s44()?;
+                let g = self.pop_s44()?;
+                let r = self.pop_s44()?;
+
+                // Convert 0.0-1.0 to 0-255
+                let r8 = (Into::<f64>::into(r).clamp(0.0, 1.0) * 255.0) as u32;
+                let g8 = (Into::<f64>::into(g).clamp(0.0, 1.0) * 255.0) as u32;
+                let b8 = (Into::<f64>::into(b).clamp(0.0, 1.0) * 255.0) as u32;
+                let a8 = (Into::<f64>::into(a).clamp(0.0, 1.0) * 255.0) as u32;
+
+                let color = (a8 << 24) | (r8 << 16) | (g8 << 8) | b8;
+                self.stack.push(Value::U32(color));
+            }
+
+            Opcode::rgb => {
+                let b = self.pop_s44()?;
+                let g = self.pop_s44()?;
+                let r = self.pop_s44()?;
+
+                // Convert 0.0-1.0 to 0-255, alpha = 1.0
+                let r8 = (Into::<f64>::into(r).clamp(0.0, 1.0) * 255.0) as u32;
+                let g8 = (Into::<f64>::into(g).clamp(0.0, 1.0) * 255.0) as u32;
+                let b8 = (Into::<f64>::into(b).clamp(0.0, 1.0) * 255.0) as u32;
+
+                let color = 0xFF000000 | (r8 << 16) | (g8 << 8) | b8;
+                self.stack.push(Value::U32(color));
+            }
+
             // Everything else is not yet implemented
             _ => {
                 return Err(format!("Opcode not yet implemented: {:?}", opcode));
@@ -185,6 +255,11 @@ impl VM {
     /// Check if halted
     pub fn is_halted(&self) -> bool {
         self.halted
+    }
+
+    /// Get reference to canvas
+    pub fn canvas(&self) -> &Canvas {
+        &self.canvas
     }
 }
 
