@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FGTW - Rendered by Toka VM</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+
+        .console {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: #1a1a1a;
+            border-top: 1px solid #333;
+            padding: 10px;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            height: 200px;
+            overflow-y: auto;
+            display: none;
+        }
+
+        .console.visible {
+            display: block;
+        }
+
+        .console-line {
+            margin: 2px 0;
+            color: #aaa;
+        }
+
+        .console-error {
+            color: #ff4a4a;
+        }
+
+        .console-info {
+            color: #4a9eff;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="console" id="console"></div>
+
+    <script>
+        // Console toggle with Ctrl+` (or Cmd+` on Mac)
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+                e.preventDefault();
+                const consoleEl = document.getElementById('console');
+                consoleEl.classList.toggle('visible');
+            }
+        });
+    </script>
+
+    <script type="module">
+        // Console logging
+        function log(message, type = 'info') {
+            const consoleEl = document.getElementById('console');
+            const line = document.createElement('div');
+            line.className = `console-line console-${type}`;
+            line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            consoleEl.appendChild(line);
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+
+            if (type === 'error') {
+                console.error(message);
+            } else {
+                console.log(message);
+            }
+        }
+
+        // Capsule URL - signed VSF executable with bytecode
+        const CAPSULE_URL = './fgtw.vsf';
+
+        let TokaVM = null;
+        let load_capsule = null;
+        let bytecode = null;
+        let vm = null;
+        let canvas = null;
+        let ctx = null;
+
+        async function init() {
+            try {
+                log('Loading Toka WASM module...', 'info');
+
+                // Cache-bust the WASM module
+                const cacheBust = Date.now();
+                const module = await import(`./pkg/toka.js?v=${cacheBust}`);
+                await module.default();
+                TokaVM = module.TokaVM;
+                load_capsule = module.load_capsule;
+
+                log('WASM loaded successfully', 'info');
+
+                // Fetch the capsule file
+                log(`Fetching capsule: ${CAPSULE_URL}`, 'info');
+                const response = await fetch(CAPSULE_URL);
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch capsule: ${response.status} ${response.statusText}`);
+                }
+                const capsuleData = new Uint8Array(await response.arrayBuffer());
+                log(`Capsule fetched: ${capsuleData.length} bytes`, 'info');
+
+                // Load and verify capsule - extracts bytecode
+                log('Loading and verifying capsule...', 'info');
+                bytecode = load_capsule(capsuleData);
+                log(`Capsule verified! Bytecode: ${bytecode.length} bytes`, 'info');
+
+                // Setup canvas
+                canvas = document.getElementById('canvas');
+                ctx = canvas.getContext('2d');
+
+                // Set canvas resolution
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+                canvas.width = width;
+                canvas.height = height;
+
+                log(`Canvas: ${width}x${height}`, 'info');
+
+                // Create VM with bytecode from capsule
+                vm = new TokaVM(bytecode, width, height);
+                log(`VM created`, 'info');
+
+                // Run the program
+                try {
+                    const result = vm.run(100000);
+                    log(`Program executed, result: ${result}`, 'info');
+                } catch (runErr) {
+                    log(`Run error: ${runErr}`, 'error');
+                    throw runErr;
+                }
+
+                // Render to canvas
+                render();
+
+                log('FGTW rendered successfully!', 'info');
+
+            } catch (err) {
+                log(`Error: ${err}`, 'error');
+                log(`Error type: ${typeof err}`, 'error');
+                log(`Error message: ${err.message}`, 'error');
+                log(`Error string: ${String(err)}`, 'error');
+                if (err.stack) log(`Stack: ${err.stack}`, 'error');
+            }
+        }
+
+        function render() {
+            if (!vm) return;
+
+            try {
+                const rgba = vm.get_canvas_rgba();
+                log(`Canvas size: ${vm.width()}x${vm.height()}`, 'info');
+                log(`RGBA length: ${rgba.length} (expected ${vm.width() * vm.height() * 4})`, 'info');
+                log(`First pixel (0,0): R=${rgba[0]} G=${rgba[1]} B=${rgba[2]} A=${rgba[3]}`, 'info');
+
+                // Check center pixel (should be white for the test square)
+                const centerX = Math.floor(vm.width() / 2);
+                const centerY = Math.floor(vm.height() / 2);
+                const centerIdx = (centerY * vm.width() + centerX) * 4;
+                log(`Center pixel (${centerX},${centerY}) RGBA: R=${rgba[centerIdx]} G=${rgba[centerIdx+1]} B=${rgba[centerIdx+2]} A=${rgba[centerIdx+3]}`, 'info');
+
+                const imageData = new ImageData(
+                    new Uint8ClampedArray(rgba),
+                    vm.width(),
+                    vm.height()
+                );
+                ctx.putImageData(imageData, 0, 0);
+            } catch (err) {
+                log(`Render error: ${err.message}`, 'error');
+            }
+        }
+
+        // Handle window resize - recreate VM with new dimensions
+        window.addEventListener('resize', () => {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+
+            if (TokaVM && bytecode) {
+                // Preserve current RU if we have an existing VM
+                const currentRu = vm ? vm.get_ru() : 1.0;
+
+                // Recreate VM with new dimensions
+                vm = new TokaVM(bytecode, width, height);
+                vm.set_ru(currentRu);
+                vm.run(100000);
+                render();
+
+                log(`Resized: ${width}x${height}, span: ${vm.get_span()}`, 'info');
+            }
+        });
+
+        // Zoom controls (like Photon)
+        // Ctrl++ = zoom in, Ctrl+- = zoom out, Ctrl+0 = reset
+        // Ctrl+scroll = smooth zoom
+        document.addEventListener('keydown', (e) => {
+            if (!vm || !bytecode) return;
+
+            if (e.ctrlKey || e.metaKey) {
+                let zoomSteps = 0;
+
+                if (e.key === '=' || e.key === '+') {
+                    // Ctrl++ (zoom in)
+                    e.preventDefault();
+                    zoomSteps = 4; // 4 steps of 33/32 each
+                } else if (e.key === '-') {
+                    // Ctrl+- (zoom out)
+                    e.preventDefault();
+                    zoomSteps = -4;
+                } else if (e.key === '0') {
+                    // Ctrl+0 (reset zoom)
+                    e.preventDefault();
+                    vm.set_ru(1.0);
+                    log(`RU reset to 1.0`, 'info');
+                    vm.rerun(bytecode);
+                    render();
+                    return;
+                }
+
+                if (zoomSteps !== 0) {
+                    vm.adjust_zoom(zoomSteps);
+                    const newRu = vm.get_ru();
+                    log(`RU: ${newRu.toFixed(3)} (span: ${vm.get_span()})`, 'info');
+                    vm.rerun(bytecode);
+                    render();
+                }
+            }
+        });
+
+        // Ctrl+scroll for smooth zooming
+        document.addEventListener('wheel', (e) => {
+            if (!vm || !bytecode) return;
+
+            if (e.ctrlKey || e.metaKey) {
+                e.preventDefault();
+
+                // Convert scroll delta to zoom steps
+                // Negative deltaY = scroll up = zoom in
+                const steps = -e.deltaY / 50; // Adjust sensitivity
+                vm.adjust_zoom(steps);
+
+                const newRu = vm.get_ru();
+                log(`RU: ${newRu.toFixed(3)} (span: ${vm.get_span()})`, 'info');
+                vm.rerun(bytecode);
+                render();
+            }
+        }, { passive: false });
+
+        init();
+    </script>
+</body>
+</html>

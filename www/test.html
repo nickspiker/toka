@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Basic Test</title>
+</head>
+<body>
+    <h1>Test Page</h1>
+    <div id="output">Loading...</div>
+
+    <script>
+        document.getElementById('output').textContent = 'JavaScript works!';
+        console.log('Basic JS works');
+    </script>
+
+    <script type="module">
+        console.log('ES6 modules work!');
+        document.getElementById('output').textContent += ' ES6 modules work!';
+
+        try {
+            const module = await import('./pkg/toka.js');
+            console.log('WASM module imported:', module);
+            document.getElementById('output').textContent += ' WASM module imported!';
+        } catch (err) {
+            console.error('WASM import failed:', err);
+            document.getElementById('output').textContent += ` ERROR: ${err.message}`;
+        }
+    </script>
+</body>
+</html>

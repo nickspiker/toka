@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Toka VM - Browser Test</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background: #000;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+
+        .console {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: rgba(0, 0, 0, 0.9);
+            backdrop-filter: blur(10px);
+            border-top: 1px solid #333;
+            padding: 20px;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            height: 40vh;
+            overflow-y: auto;
+            display: none;
+            z-index: 1000;
+        }
+
+        .console.visible {
+            display: block;
+        }
+
+        .console-toggle-hint {
+            position: fixed;
+            bottom: 10px;
+            right: 10px;
+            font-size: 11px;
+            color: #666;
+            background: rgba(42, 42, 42, 0.8);
+            backdrop-filter: blur(5px);
+            padding: 5px 10px;
+            border-radius: 3px;
+            border: 1px solid #444;
+            z-index: 999;
+        }
+
+        .console-line {
+            margin: 2px 0;
+            color: #aaa;
+        }
+
+        .console-error {
+            color: #ff4a4a;
+        }
+
+        .console-info {
+            color: #4a9eff;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+
+    <div class="console" id="console">
+        <div class="console-line console-info">Console output:</div>
+    </div>
+
+    <div class="console-toggle-hint">Press Ctrl+` to toggle console</div>
+
+    <script>
+        // Console toggle with Ctrl+` (or Cmd+` on Mac)
+        document.addEventListener('keydown', (e) => {
+            if ((e.ctrlKey || e.metaKey) && e.key === '`') {
+                e.preventDefault();
+                const console = document.getElementById('console');
+                console.classList.toggle('visible');
+            }
+        });
+    </script>
+
+    <script>
+        // Early error logging - runs before module loads
+        window.addEventListener('error', (e) => {
+            const consoleEl = document.getElementById('console');
+            if (consoleEl) {
+                const line = document.createElement('div');
+                line.className = 'console-line console-error';
+                line.textContent = `[ERROR] ${e.message} at ${e.filename}:${e.lineno}`;
+                consoleEl.appendChild(line);
+            }
+        });
+
+        window.addEventListener('unhandledrejection', (e) => {
+            const consoleEl = document.getElementById('console');
+            if (consoleEl) {
+                const line = document.createElement('div');
+                line.className = 'console-line console-error';
+                line.textContent = `[PROMISE ERROR] ${e.reason}`;
+                consoleEl.appendChild(line);
+            }
+        });
+
+        // Log that we're about to load the module
+        document.addEventListener('DOMContentLoaded', () => {
+            const consoleEl = document.getElementById('console');
+            const line = document.createElement('div');
+            line.className = 'console-line console-info';
+            line.textContent = '[INIT] DOM loaded, starting app.js...';
+            consoleEl.appendChild(line);
+        });
+    </script>
+
+    <script type="module" src="./app.js"></script>
+</body>
+</html>

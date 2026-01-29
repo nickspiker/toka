@@ -19,14 +19,6 @@ pub enum Opcode {
     /// VSF: {ps}[value]
     push,
 
-    /// Push 0.0 (optimized)
-    /// VSF: {pz}
-    push_zero,
-
-    /// Push 1.0 (optimized)
-    /// VSF: {po}
-    push_one,
-
     /// Discard top of stack
     /// VSF: {pp}
     pop,
@@ -191,18 +183,35 @@ pub enum Opcode {
     /// VSF: {ge}
     ge,
 
-    // ==================== LOGIC ====================
-    /// Pop b, a; push 1.0 if both non-zero else 0.0
+    // ==================== LOGIC (Logical/Boolean) ====================
+    /// Logical AND: pop b, a; push 1 if both truthy else 0
     /// VSF: {an}
     and,
 
-    /// Pop b, a; push 1.0 if either non-zero else 0.0
+    /// Logical OR: pop b, a; push 1 if either truthy else 0
     /// VSF: {or}
     or,
 
-    /// Pop a; push 1.0 if zero else 0.0
+    /// Logical NOT: pop a; push 1 if falsy else 0
     /// VSF: {nt}
     not,
+
+    // ==================== BITWISE ====================
+    /// Bitwise AND: pop b, a; push a & b (bit-level AND)
+    /// VSF: {ba}
+    bit_and,
+
+    /// Bitwise OR: pop b, a; push a | b (bit-level OR)
+    /// VSF: {bo}
+    bit_or,
+
+    /// Bitwise XOR: pop b, a; push a ^ b (bit-level XOR)
+    /// VSF: {bx}
+    bit_xor,
+
+    /// Bitwise NOT: pop a; push ~a (bit-level complement)
+    /// VSF: {bn}
+    bit_not,
 
     // ==================== TYPE SYSTEM ====================
     /// Pop value; push type identifier as string (d-type)
@@ -309,7 +318,7 @@ pub enum Opcode {
     /// VSF: {sf}
     set_font,
 
-    // ==================== COLOR UTILITIES ====================
+    // ==================== COLOUR UTILITIES ====================
     /// Pop a, b, g, r (S44 0.0-1.0); push u32 RGBA
     /// VSF: {ca}
     rgba,
@@ -317,14 +326,6 @@ pub enum Opcode {
     /// Pop b, g, r (S44 0.0-1.0); push u32 RGBA (alpha=1.0)
     /// VSF: {cb}
     rgb,
-
-    /// Pop t, colour_b, colour_a; push interpolated u32 RGBA
-    /// VSF: {ci}
-    color_lerp,
-
-    /// Pop a, l, s, h; push u32 RGBA
-    /// VSF: {ch}
-    hsla,
 
     // ==================== CONTROL FLOW ====================
     /// Call function at bytecode offset
@@ -407,23 +408,20 @@ const fn pack(a: u8, b: u8) -> u16 {
 }
 
 impl Opcode {
-    /// Parse opcode from two-character identifier
+    /// Parse opcode from packed u16
     ///
-    /// VSF bytecode format: {ab} where a,b are lowercase letters
-    /// Packed into u16 for efficient single-comparison matching
-    pub fn from_bytes(bytes: &[u8; 2]) -> Option<Self> {
-        let op = pack(bytes[0], bytes[1]);
+    /// Efficient single-match lookup for all opcodes.
+    /// Format: (first_letter << 8) | second_letter
+    pub fn from_u16(op: u16) -> Option<Self> {
 
         match op {
             // Stack manipulation
-            0x7073 => Some(Self::push),        // ps
-            0x707a => Some(Self::push_zero),   // pz
-            0x706f => Some(Self::push_one),    // po
-            0x7070 => Some(Self::pop),         // pp
-            0x6470 => Some(Self::dup),         // dp
-            0x646e => Some(Self::dup_n),       // dn
-            0x7377 => Some(Self::swap),        // sw
-            0x7274 => Some(Self::rotate),      // rt
+            0x7073 => Some(Self::push),   // ps
+            0x7070 => Some(Self::pop),    // pp
+            0x6470 => Some(Self::dup),    // dp
+            0x646e => Some(Self::dup_n),  // dn
+            0x7377 => Some(Self::swap),   // sw
+            0x7274 => Some(Self::rotate), // rt
 
             // Local variables
             0x6c61 => Some(Self::local_alloc), // la
@@ -432,60 +430,60 @@ impl Opcode {
             0x6c74 => Some(Self::local_tee),   // lt
 
             // Arithmetic
-            0x6164 => Some(Self::add),         // ad
-            0x7362 => Some(Self::sub),         // sb
-            0x6d6c => Some(Self::mul),         // ml
-            0x6476 => Some(Self::div),         // dv
-            0x7263 => Some(Self::recip),       // rc
-            0x6d64 => Some(Self::mod_),        // md
-            0x6e67 => Some(Self::neg),         // ng
-            0x6162 => Some(Self::abs),         // ab
-            0x7371 => Some(Self::sqrt),        // sq
-            0x7077 => Some(Self::pow),         // pw
-            0x6d6e => Some(Self::min),         // mn
-            0x6d78 => Some(Self::max),         // mx
-            0x636d => Some(Self::clamp),       // cm
-            0x666c => Some(Self::floor),       // fl
-            0x636c => Some(Self::ceil),        // cl
-            0x726e => Some(Self::round),       // rn
-            0x6661 => Some(Self::frac),        // fa
-            0x6c70 => Some(Self::lerp),        // lp
+            0x6164 => Some(Self::add),   // ad
+            0x7362 => Some(Self::sub),   // sb
+            0x6d6c => Some(Self::mul),   // ml
+            0x6476 => Some(Self::div),   // dv
+            0x7263 => Some(Self::recip), // rc
+            0x6d64 => Some(Self::mod_),  // md
+            0x6e67 => Some(Self::neg),   // ng
+            0x6162 => Some(Self::abs),   // ab
+            0x7371 => Some(Self::sqrt),  // sq
+            0x7077 => Some(Self::pow),   // pw
+            0x6d6e => Some(Self::min),   // mn
+            0x6d78 => Some(Self::max),   // mx
+            0x636d => Some(Self::clamp), // cm
+            0x666c => Some(Self::floor), // fl
+            0x636c => Some(Self::ceil),  // cl
+            0x726e => Some(Self::round), // rn
+            0x6661 => Some(Self::frac),  // fa
+            0x6c70 => Some(Self::lerp),  // lp
 
             // Trigonometry
-            0x736e => Some(Self::sin),         // sn
-            0x6373 => Some(Self::cos),         // cs
-            0x746e => Some(Self::tan),         // tn
-            0x6973 => Some(Self::asin),        // is
-            0x6963 => Some(Self::acos),        // ic
-            0x6961 => Some(Self::atan),        // ia
-            0x6132 => Some(Self::atan2),       // a2
+            0x736e => Some(Self::sin),   // sn
+            0x6373 => Some(Self::cos),   // cs
+            0x746e => Some(Self::tan),   // tn
+            0x6973 => Some(Self::asin),  // is
+            0x6963 => Some(Self::acos),  // ic
+            0x6961 => Some(Self::atan),  // ia
+            0x6132 => Some(Self::atan2), // a2
 
             // Comparison
-            0x6571 => Some(Self::eq),          // eq
-            0x6e65 => Some(Self::ne),          // ne
-            0x6c6f => Some(Self::lt),          // lo
-            0x6c65 => Some(Self::le),          // le
-            0x6774 => Some(Self::gt),          // gt
-            0x6765 => Some(Self::ge),          // ge
+            0x6571 => Some(Self::eq), // eq
+            0x6e65 => Some(Self::ne), // ne
+            0x6c6f => Some(Self::lt), // lo
+            0x6c65 => Some(Self::le), // le
+            0x6774 => Some(Self::gt), // gt
+            0x6765 => Some(Self::ge), // ge
 
             // Logic
-            0x616e => Some(Self::and),         // an
-            0x6f72 => Some(Self::or),          // or
-            0x6e74 => Some(Self::not),         // nt
+            0x616e => Some(Self::and), // an
+            0x6f72 => Some(Self::or),  // or
+            0x6e74 => Some(Self::not), // nt
 
             // Type system
-            0x7479 => Some(Self::typeof_),     // ty
-            0x7473 => Some(Self::to_s44),      // ts
-            0x7475 => Some(Self::to_u32),      // tu
-            0x7478 => Some(Self::to_string),   // tx
+            0x7479 => Some(Self::typeof_),   // ty
+            0x7473 => Some(Self::to_s44),    // ts
+            0x7475 => Some(Self::to_u32),    // tu
+            0x7478 => Some(Self::to_string), // tx
 
             // Arrays
-            0x6177 => Some(Self::array_new),   // aw
-            0x616c => Some(Self::array_len),   // al
-            0x6167 => Some(Self::array_get),   // ag
-            0x6165 => Some(Self::array_set),   // ae
-            0x6170 => Some(Self::array_push),  // ap
-            0x616f => Some(Self::array_pop),   // ao
+            0x6177 => Some(Self::array_new),  // aw
+            0x616c => Some(Self::array_len),  // al
+            0x6167 => Some(Self::array_get),  // ag
+            0x6165 => Some(Self::array_set),  // ae
+            0x6170 => Some(Self::array_push), // ap
+            0x616f => Some(Self::array_pop),  // ao
 
             // Strings
             0x7363 => Some(Self::string_concat), // sc
@@ -499,29 +497,27 @@ impl Opcode {
             0x6871 => Some(Self::handle_query), // hq
 
             // Drawing
-            0x6372 => Some(Self::clear),        // cr
-            0x6672 => Some(Self::fill_rect),    // fr
-            0x7372 => Some(Self::stroke_rect),  // sr
-            0x6663 => Some(Self::fill_circle),  // fc
-            0x736f => Some(Self::stroke_circle),// so
-            0x646c => Some(Self::draw_line),    // dl
-            0x6474 => Some(Self::draw_text),    // dt
-            0x7366 => Some(Self::set_font),     // sf
+            0x6372 => Some(Self::clear),         // cr
+            0x6672 => Some(Self::fill_rect),     // fr
+            0x7372 => Some(Self::stroke_rect),   // sr
+            0x6663 => Some(Self::fill_circle),   // fc
+            0x736f => Some(Self::stroke_circle), // so
+            0x646c => Some(Self::draw_line),     // dl
+            0x6474 => Some(Self::draw_text),     // dt
+            0x7366 => Some(Self::set_font),      // sf
 
-            // Color utilities
-            0x6361 => Some(Self::rgba),         // ca
-            0x6362 => Some(Self::rgb),          // cb
-            0x6369 => Some(Self::color_lerp),   // ci
-            0x6368 => Some(Self::hsla),         // ch
+            // Colour utilities
+            0x6361 => Some(Self::rgba), // ca
+            0x6362 => Some(Self::rgb),  // cb
 
             // Control flow
-            0x636e => Some(Self::call),         // cn
-            0x6364 => Some(Self::call_indirect),// cd
-            0x7265 => Some(Self::return_),      // re
-            0x7276 => Some(Self::return_value), // rv
-            0x6a6d => Some(Self::jump),         // jm
-            0x6a69 => Some(Self::jump_if),      // ji
-            0x6a7a => Some(Self::jump_zero),    // jz
+            0x636e => Some(Self::call),          // cn
+            0x6364 => Some(Self::call_indirect), // cd
+            0x7265 => Some(Self::return_),       // re
+            0x7276 => Some(Self::return_value),  // rv
+            0x6a6d => Some(Self::jump),          // jm
+            0x6a69 => Some(Self::jump_if),       // ji
+            0x6a7a => Some(Self::jump_zero),     // jz
 
             // Random numbers
             0x7264 => Some(Self::random),       // rd
@@ -529,21 +525,46 @@ impl Opcode {
             0x7272 => Some(Self::random_range), // rr
 
             // Cryptography
-            0x6268 => Some(Self::blake3),       // bh
+            0x6268 => Some(Self::blake3), // bh
 
             // Time
-            0x746d => Some(Self::timestamp),    // tm
+            0x746d => Some(Self::timestamp), // tm
 
             // Error handling
-            0x6172 => Some(Self::assert),       // ar
-            0x686c => Some(Self::halt),         // hl
+            0x6172 => Some(Self::assert), // ar
+            0x686c => Some(Self::halt),   // hl
 
             // Debug
-            0x6462 => Some(Self::debug_print),  // db
-            0x6473 => Some(Self::debug_stack),  // ds
-            0x6e70 => Some(Self::nop),          // np
+            0x6462 => Some(Self::debug_print), // db
+            0x6473 => Some(Self::debug_stack), // ds
+            0x6e70 => Some(Self::nop),         // np
 
             _ => None,
+        }
+    }
+
+    /// Parse opcode from two-character identifier
+    ///
+    /// VSF bytecode format: {ab} where a,b are lowercase letters
+    /// Packed into u16 for efficient single-comparison matching
+    pub fn from_bytes(bytes: &[u8; 2]) -> Option<Self> {
+        let op = pack(bytes[0], bytes[1]);
+        Self::from_u16(op)
+    }
+
+    /// Parse opcode from VSF type
+    ///
+    /// Converts VsfType::op(a, b) into Opcode enum
+    /// Returns error if not an opcode type or unknown opcode
+    pub fn from_vsf(value: &vsf::VsfType) -> Result<Self, String> {
+        match value {
+            vsf::VsfType::op(a, b) => {
+                let packed = pack(*a, *b);
+                Self::from_u16(packed)
+                    .ok_or_else(|| format!("Unknown opcode: {{{}{}}} (0x{:04x})",
+                        *a as char, *b as char, packed))
+            }
+            _ => Err(format!("Expected opcode, got VSF type: {:?}", value)),
         }
     }
 
@@ -551,8 +572,6 @@ impl Opcode {
     pub fn to_bytes(&self) -> [u8; 2] {
         match self {
             Self::push => *b"ps",
-            Self::push_zero => *b"pz",
-            Self::push_one => *b"po",
             Self::pop => *b"pp",
             Self::dup => *b"dp",
             Self::dup_n => *b"dn",
@@ -596,6 +615,10 @@ impl Opcode {
             Self::and => *b"an",
             Self::or => *b"or",
             Self::not => *b"nt",
+            Self::bit_and => *b"ba",
+            Self::bit_or => *b"bo",
+            Self::bit_xor => *b"bx",
+            Self::bit_not => *b"bn",
             Self::typeof_ => *b"ty",
             Self::to_s44 => *b"ts",
             Self::to_u32 => *b"tu",
@@ -623,8 +646,6 @@ impl Opcode {
             Self::set_font => *b"sf",
             Self::rgba => *b"ca",
             Self::rgb => *b"cb",
-            Self::color_lerp => *b"ci",
-            Self::hsla => *b"ch",
             Self::call => *b"cn",
             Self::call_indirect => *b"cd",
             Self::return_ => *b"re",

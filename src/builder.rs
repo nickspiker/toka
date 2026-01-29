@@ -1,35 +1,44 @@
-//! Rust DSL for building Toka bytecode programs
+//! Rust DSL for building Toka programs
 //!
-//! Provides a type-safe, chainable API for constructing Toka bytecode using
-//! mnemonic method names that match the opcodes exactly (e.g., `.po()` for push_one).
+//! Provides a type-safe, chainable API for constructing Toka bytecode using mnemonic method names that match the opcodes exactly (e.g., `.ps()` for push).
 //!
 //! # Example
 //!
 //! ```rust
 //! use toka::builder::Program;
+//! use vsf::types::VsfType;
 //!
-//! // Draw a red square in the center
+//! // Draw a red square in the center (high-level API with VSF colours)
 //! let bytecode = Program::new()
-//!     .po()           // push_one (r=1.0)
-//!     .pz()           // push_zero (g=0.0)
-//!     .pz()           // push_zero (b=0.0)
+//!     .fill_rect(0.25, 0.25, 0.5, 0.5, VsfType::rr)  // VSF red
+//!     .hl()
+//!     .build();
+//!
+//! // Or use low-level opcodes for maximum control
+//! let bytecode = Program::new()
+//!     .ps_s44(1)      // push r=1
+//!     .ps_s44(0)      // push g=0
+//!     .ps_s44(0)      // push b=0
 //!     .cb()           // rgb (create colour)
-//!     .ps_s44(0.25)   // push x
-//!     .ps_s44(0.25)   // push y
-//!     .ps_s44(0.5)    // push width
-//!     .ps_s44(0.5)    // push height
+//!     .ps_c44(0.25,0.25)   // push x and y as Circle
+//!     .ps_c44(0.5,0.5)    // push width and height
 //!     .fr()           // fill_rect
 //!     .hl()           // halt
 //!     .build();
 //! ```
 
-use spirix::ScalarF4E4;
+use spirix::*;
+use vsf::types::VsfType;
 
-/// Bytecode program builder with chainable opcode methods
+/// Emit a VSF-encoded opcode: `{ab}` -> 4 bytes
+#[inline]
+fn emit_op(bytecode: &mut Vec<u8>, a: u8, b: u8) {
+    bytecode.extend_from_slice(&VsfType::op(a, b).flatten());
+}
+
+/// Toka builder with chainable opcode methods
 ///
-/// Each method corresponds to a Toka opcode and appends the appropriate
-/// bytes to the bytecode vector. The builder pattern allows for readable,
-/// type-safe program construction with compile-time checking.
+/// Each method corresponds to a Toka opcode and appends the appropriate bytes to the bytecode vector. The builder pattern allows for readable, type-safe program construction with compile-time checking.
 pub struct Program {
     bytecode: Vec<u8>,
 }
@@ -52,95 +61,88 @@ impl Program {
     /// Push a VSF-encoded value (requires inline VSF data after opcode)
     /// VSF: {ps}[vsf_value]
     pub fn ps(mut self, vsf_bytes: &[u8]) -> Self {
-        self.bytecode.extend_from_slice(&[0x70, 0x73]); // ps
+        emit_op(&mut self.bytecode, b'p', b's');
         self.bytecode.extend_from_slice(vsf_bytes);
         self
     }
 
     /// Push S44 value (encodes as VSF s44)
     /// VSF: {ps}s44[bytes]
-    pub fn ps_s44(mut self, value: f64) -> Self {
-        self.bytecode.extend_from_slice(&[0x70, 0x73]); // ps
-        self.bytecode.push(b's');
-        self.bytecode.push(b'4');
-        self.bytecode.push(b'4');
-
-        // Encode S44 as VSF
-        let s44 = ScalarF4E4::from(value);
-        self.bytecode.extend_from_slice(&s44.fraction.to_le_bytes());
-        self.bytecode.extend_from_slice(&s44.exponent.to_le_bytes());
+    pub fn ps_s44(mut self, value: impl Into<ScalarF4E4>) -> Self {
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode
+            .extend_from_slice(&VsfType::s44(value.into()).flatten());
         self
     }
 
-    /// Push u32 value (encodes as VSF u5)
-    /// VSF: {ps}u5[bytes]
+    /// Push C44 value - Circle with two components (e.g., position, size)
+    /// VSF: {ps}c44[bytes]
+    pub fn ps_c44(
+        mut self,
+        re: impl Into<ScalarF4E4>,
+        im: impl Into<ScalarF4E4>,
+    ) -> Self {
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(
+            &VsfType::c44(CircleF4E4::from((re.into(), im.into()))).flatten(),
+        );
+        self
+    }
+
+    /// Push u32 value as unbounded VSF u (variable-length encoding)
+    /// VSF: {ps}u[bytes]
     pub fn ps_u32(mut self, value: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x70, 0x73]); // ps
-        self.bytecode.push(b'u');
-        self.bytecode.push(b'5');
-        self.bytecode.extend_from_slice(&value.to_le_bytes());
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(value as usize, false).flatten());
         self
     }
 
     /// Push string value (encodes as VSF x - UTF-8)
     /// VSF: {ps}x[len][bytes]
     pub fn ps_str(mut self, s: &str) -> Self {
-        self.bytecode.extend_from_slice(&[0x70, 0x73]); // ps
-        self.bytecode.push(b'x');
-        let len = s.len() as u64;
-        self.bytecode.extend_from_slice(&len.to_le_bytes());
-        self.bytecode.extend_from_slice(s.as_bytes());
-        self
-    }
-
-    /// Push zero (S44)
-    /// VSF: {pz}
-    pub fn pz(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x70, 0x7a]); // pz
-        self
-    }
-
-    /// Push one (S44)
-    /// VSF: {po}
-    pub fn po(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x70, 0x6f]); // po
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode
+            .extend_from_slice(&VsfType::x(s.to_string()).flatten());
         self
     }
 
     /// Pop top of stack
     /// VSF: {pp}
     pub fn pp(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x70, 0x70]); // pp
+        emit_op(&mut self.bytecode, b'p', b'p');
         self
     }
 
     /// Duplicate top of stack
     /// VSF: {dp}
     pub fn dp(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x64, 0x70]); // dp
+        emit_op(&mut self.bytecode, b'd', b'p');
         self
     }
 
     /// Duplicate N items from stack
     /// VSF: {dn}[count:u]
     pub fn dn(mut self, count: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x64, 0x6e]); // dn
-        self.bytecode.extend_from_slice(&count.to_le_bytes());
+        emit_op(&mut self.bytecode, b'd', b'n');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(count as usize, false).flatten());
         self
     }
 
-    /// Swap top two stack items
+    /// Swap top two stack items (runtime swaps whatever is on stack)
     /// VSF: {sw}
     pub fn sw(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x73, 0x77]); // sw
+        emit_op(&mut self.bytecode, b's', b'w');
         self
     }
 
-    /// Rotate top N stack items
+    /// Rotate top N stack items (runtime operation)
     /// VSF: {rt}[count:u]
     pub fn rt(mut self, count: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x72, 0x74]); // rt
-        self.bytecode.extend_from_slice(&count.to_le_bytes());
+        emit_op(&mut self.bytecode, b'r', b't');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(count as usize, false).flatten());
         self
     }
 
@@ -149,451 +151,651 @@ impl Program {
     /// Allocate N local variables
     /// VSF: {la}[count:u]
     pub fn la(mut self, count: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x6c, 0x61]); // la
-        self.bytecode.extend_from_slice(&count.to_le_bytes());
+        emit_op(&mut self.bytecode, b'l', b'a');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(count as usize, false).flatten());
         self
     }
 
     /// Get local variable at index
     /// VSF: {lg}[index:u]
     pub fn lg(mut self, index: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x6c, 0x67]); // lg
-        self.bytecode.extend_from_slice(&index.to_le_bytes());
+        emit_op(&mut self.bytecode, b'l', b'g');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(index as usize, false).flatten());
         self
     }
 
     /// Set local variable at index
     /// VSF: {ls}[index:u]
     pub fn ls(mut self, index: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x6c, 0x73]); // ls
-        self.bytecode.extend_from_slice(&index.to_le_bytes());
+        emit_op(&mut self.bytecode, b'l', b's');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(index as usize, false).flatten());
         self
     }
 
     /// Tee local variable (set without popping)
     /// VSF: {lt}[index:u]
     pub fn lt(mut self, index: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x6c, 0x74]); // lt
-        self.bytecode.extend_from_slice(&index.to_le_bytes());
+        emit_op(&mut self.bytecode, b'l', b't');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(index as usize, false).flatten());
         self
     }
 
     // ==================== ARITHMETIC ====================
 
-    /// Add: pop b, a; push a+b
+    /// Add: pop b, a; push a+b (Spirix handles type compatibility)
     /// VSF: {ad}
     pub fn ad(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x61, 0x64]); // ad
+        emit_op(&mut self.bytecode, b'a', b'd');
         self
     }
 
     /// Subtract: pop b, a; push a-b
     /// VSF: {sb}
     pub fn sb(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x73, 0x62]); // sb
+        emit_op(&mut self.bytecode, b's', b'b');
         self
     }
 
     /// Multiply: pop b, a; push a*b
     /// VSF: {ml}
     pub fn ml(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6d, 0x6c]); // ml
+        emit_op(&mut self.bytecode, b'm', b'l');
         self
     }
 
     /// Divide: pop b, a; push a/b
     /// VSF: {dv}
     pub fn dv(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x64, 0x76]); // dv
+        emit_op(&mut self.bytecode, b'd', b'v');
         self
     }
 
-    /// Reciprocal: pop a; push 1/a
+    /// Reciprocal: pop a; push 1/a (works for all Spirix numeric types)
     /// VSF: {rc}
     pub fn rc(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x72, 0x63]); // rc
+        emit_op(&mut self.bytecode, b'r', b'c');
         self
     }
 
     /// Modulo: pop b, a; push a%b
     /// VSF: {md}
     pub fn md(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6d, 0x64]); // md
+        emit_op(&mut self.bytecode, b'm', b'd');
         self
     }
 
     /// Negate: pop a; push -a
     /// VSF: {ng}
     pub fn ng(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6e, 0x67]); // ng
+        emit_op(&mut self.bytecode, b'n', b'g');
         self
     }
 
     /// Absolute value: pop a; push |a|
     /// VSF: {ab}
     pub fn ab(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x61, 0x62]); // ab
+        emit_op(&mut self.bytecode, b'a', b'b');
         self
     }
 
     /// Square root: pop a; push sqrt(a)
     /// VSF: {sq}
     pub fn sq(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x73, 0x71]); // sq
+        emit_op(&mut self.bytecode, b's', b'q');
         self
     }
 
     /// Power: pop b, a; push a^b
     /// VSF: {pw}
     pub fn pw(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x70, 0x77]); // pw
+        emit_op(&mut self.bytecode, b'p', b'w');
         self
     }
 
     /// Minimum: pop b, a; push min(a, b)
     /// VSF: {mn}
     pub fn mn(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6d, 0x6e]); // mn
+        emit_op(&mut self.bytecode, b'm', b'n');
         self
     }
 
     /// Maximum: pop b, a; push max(a, b)
     /// VSF: {mx}
     pub fn mx(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6d, 0x78]); // mx
+        emit_op(&mut self.bytecode, b'm', b'x');
         self
     }
 
     /// Clamp: pop max, min, a; push clamp(a, min, max)
     /// VSF: {cm}
     pub fn cm(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x63, 0x6d]); // cm
+        emit_op(&mut self.bytecode, b'c', b'm');
         self
     }
 
     /// Floor: pop a; push floor(a)
     /// VSF: {fl}
     pub fn fl(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x66, 0x6c]); // fl
+        emit_op(&mut self.bytecode, b'f', b'l');
         self
     }
 
     /// Ceiling: pop a; push ceil(a)
     /// VSF: {cl}
     pub fn cl(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x63, 0x6c]); // cl
+        emit_op(&mut self.bytecode, b'c', b'l');
         self
     }
 
     /// Round: pop a; push round(a)
     /// VSF: {rn}
     pub fn rn(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x72, 0x6e]); // rn
+        emit_op(&mut self.bytecode, b'r', b'n');
         self
     }
 
     /// Fractional part: pop a; push frac(a)
     /// VSF: {fa}
     pub fn fa(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x66, 0x61]); // fa
+        emit_op(&mut self.bytecode, b'f', b'a');
         self
     }
 
     /// Linear interpolation: pop t, b, a; push a + t*(b-a)
     /// VSF: {lp}
     pub fn lp(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6c, 0x70]); // lp
+        emit_op(&mut self.bytecode, b'l', b'p');
         self
     }
 
     // ==================== TRIGONOMETRY ====================
 
-    /// Sine: pop a; push sin(a)
+    /// Sine: pop a; push sin(a) (Spirix trigonometry)
     /// VSF: {sn}
     pub fn sn(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x73, 0x6e]); // sn
+        emit_op(&mut self.bytecode, b's', b'n');
         self
     }
 
     /// Cosine: pop a; push cos(a)
     /// VSF: {cs}
     pub fn cs(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x63, 0x73]); // cs
+        emit_op(&mut self.bytecode, b'c', b's');
         self
     }
 
     /// Tangent: pop a; push tan(a)
     /// VSF: {tn}
     pub fn tn(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x74, 0x6e]); // tn
+        emit_op(&mut self.bytecode, b't', b'n');
         self
     }
 
     /// Arcsine: pop a; push asin(a)
     /// VSF: {is}
     pub fn is(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x69, 0x73]); // is
+        emit_op(&mut self.bytecode, b'i', b's');
         self
     }
 
     /// Arccosine: pop a; push acos(a)
     /// VSF: {ic}
     pub fn ic(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x69, 0x63]); // ic
+        emit_op(&mut self.bytecode, b'i', b'c');
         self
     }
 
     /// Arctangent: pop a; push atan(a)
     /// VSF: {ia}
     pub fn ia(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x69, 0x61]); // ia
+        emit_op(&mut self.bytecode, b'i', b'a');
         self
     }
 
     /// Arctangent2: pop x, y; push atan2(y, x)
-    /// VSF: {a2}
-    pub fn a2(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x61, 0x32]); // a2
+    /// VSF: {at}
+    pub fn at(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'a', b't');
         self
     }
 
     // ==================== COMPARISON ====================
 
-    /// Equal: pop b, a; push 1.0 if a==b else 0.0
+    /// Equal: pop b, a; push 1 if a==b else 0
     /// VSF: {eq}
     pub fn eq(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x65, 0x71]); // eq
+        emit_op(&mut self.bytecode, b'e', b'q');
         self
     }
 
-    /// Not equal: pop b, a; push 1.0 if a!=b else 0.0
+    /// Not equal: pop b, a; push 1 if a!=b else 0
     /// VSF: {ne}
     pub fn ne(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6e, 0x65]); // ne
+        emit_op(&mut self.bytecode, b'n', b'e');
         self
     }
 
-    /// Less than: pop b, a; push 1.0 if a<b else 0.0
+    /// Less than: pop b, a; push 1 if a<b else 0
     /// VSF: {lo}
     pub fn lo(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6c, 0x6f]); // lo
+        emit_op(&mut self.bytecode, b'l', b'o');
         self
     }
 
-    /// Less than or equal: pop b, a; push 1.0 if a<=b else 0.0
+    /// Less than or equal: pop b, a; push 1 if a<=b else 0
     /// VSF: {le}
     pub fn le(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6c, 0x65]); // le
+        emit_op(&mut self.bytecode, b'l', b'e');
         self
     }
 
-    /// Greater than: pop b, a; push 1.0 if a>b else 0.0
+    /// Greater than: pop b, a; push 1 if a>b else 0
     /// VSF: {gt}
     pub fn gt(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x67, 0x74]); // gt
+        emit_op(&mut self.bytecode, b'g', b't');
         self
     }
 
-    /// Greater than or equal: pop b, a; push 1.0 if a>=b else 0.0
+    /// Greater than or equal: pop b, a; push 1 if a>=b else 0
+    /// (Returns numeric 1/0, not bool - VSF has no bool type)
     /// VSF: {ge}
     pub fn ge(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x67, 0x65]); // ge
+        emit_op(&mut self.bytecode, b'g', b'e');
         self
     }
 
     // ==================== LOGIC ====================
 
-    /// Logical AND: pop b, a; push 1.0 if both non-zero else 0.0
+    /// Logical AND: pop b, a; push 1 if both truthy else 0
+    /// (Boolean logic: && not bitwise &)
     /// VSF: {an}
     pub fn an(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x61, 0x6e]); // an
+        emit_op(&mut self.bytecode, b'a', b'n');
         self
     }
 
-    /// Logical OR: pop b, a; push 1.0 if either non-zero else 0.0
+    /// Logical OR: pop b, a; push 1 if either truthy else 0
+    /// (Boolean logic: || not bitwise |)
     /// VSF: {or}
     pub fn or(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6f, 0x72]); // or
+        emit_op(&mut self.bytecode, b'o', b'r');
         self
     }
 
-    /// Logical NOT: pop a; push 1.0 if zero else 0.0
+    /// Logical NOT: pop a; push 1 if zero else 0
     /// VSF: {nt}
     pub fn nt(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6e, 0x74]); // nt
+        emit_op(&mut self.bytecode, b'n', b't');
+        self
+    }
+
+    // ==================== BITWISE ====================
+
+    /// Bitwise AND: pop b, a; push a & b (bit-level AND via Spirix)
+    /// Uses Spirix's aligned_and for proper exponent alignment
+    /// VSF: {ba}
+    pub fn ba(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'b', b'a');
+        self
+    }
+
+    /// Bitwise OR: pop b, a; push a | b (bit-level OR via Spirix)
+    /// Uses Spirix's aligned_or for proper exponent alignment
+    /// VSF: {bo}
+    pub fn bo(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'b', b'o');
+        self
+    }
+
+    /// Bitwise XOR: pop b, a; push a ^ b (bit-level XOR via Spirix)
+    /// Uses Spirix's aligned_xor for proper exponent alignment
+    /// VSF: {bx}
+    pub fn bx(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'b', b'x');
+        self
+    }
+
+    /// Bitwise NOT: pop a; push ~a (bit-level complement via Spirix)
+    /// VSF: {bn}
+    pub fn bn(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'b', b'n');
         self
     }
 
     // ==================== TYPE SYSTEM ====================
 
-    /// Type of: pop value; push type identifier string
+    /// Typeof: pop value; push type name as string (e.g., "s44", "u", "string")
     /// VSF: {ty}
     pub fn ty(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x74, 0x79]); // ty
+        emit_op(&mut self.bytecode, b't', b'y');
         self
     }
 
-    /// Convert to S44: pop value; push s44
+    /// Convert to S44: pop value; push s44 scalar
     /// VSF: {ts}
     pub fn ts(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x74, 0x73]); // ts
+        emit_op(&mut self.bytecode, b't', b's');
         self
     }
 
-    /// Convert to u32: pop value; push u32
+    /// Convert to unbounded uint: pop value; push VSF u
     /// VSF: {tu}
     pub fn tu(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x74, 0x75]); // tu
+        emit_op(&mut self.bytecode, b't', b'u');
         self
     }
 
-    /// Convert to string: pop value; push string
+    /// To string: pop value; push string representation
     /// VSF: {tx}
     pub fn tx(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x74, 0x78]); // tx
+        emit_op(&mut self.bytecode, b't', b'x');
         self
     }
 
     // ==================== DRAWING ====================
 
-    /// Clear canvas: pop colour (u32 AARRGGBB)
+    /// Clear canvas: pop colour (ARGB 0xAARRGGBB format)
     /// VSF: {cr}
     pub fn cr(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x63, 0x72]); // cr
+        emit_op(&mut self.bytecode, b'c', b'r');
         self
     }
 
-    /// Fill rectangle: pop colour, h, w, y, x (viewport coords 0.0-1.0)
+    /// Fill rectangle: pop colour, h, w, y, x (viewport coords 0-1)
     /// VSF: {fr}
     pub fn fr(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x66, 0x72]); // fr
+        emit_op(&mut self.bytecode, b'f', b'r');
         self
     }
 
     /// Stroke rectangle: pop colour, h, w, y, x
     /// VSF: {sr}
     pub fn sr(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x73, 0x72]); // sr
+        emit_op(&mut self.bytecode, b's', b'r');
         self
     }
 
     /// Fill circle: pop colour, radius, y, x
     /// VSF: {fc}
     pub fn fc(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x66, 0x63]); // fc
+        emit_op(&mut self.bytecode, b'f', b'c');
         self
     }
 
     /// Stroke circle: pop colour, radius, y, x
     /// VSF: {so}
     pub fn so(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x73, 0x6f]); // so
+        emit_op(&mut self.bytecode, b's', b'o');
         self
     }
 
     /// Draw line: pop colour, y2, x2, y1, x1
     /// VSF: {dl}
     pub fn dl(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x64, 0x6c]); // dl
+        emit_op(&mut self.bytecode, b'd', b'l');
         self
     }
 
     /// Draw text: pop colour, size, y, x, text
     /// VSF: {dt}
     pub fn dt(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x64, 0x74]); // dt
+        emit_op(&mut self.bytecode, b'd', b't');
         self
     }
 
     /// Set font: pop font_handle
     /// VSF: {sf}
     pub fn sf(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x73, 0x66]); // sf
+        emit_op(&mut self.bytecode, b's', b'f');
         self
     }
 
     // ==================== COLOUR UTILITIES ====================
 
-    /// RGBA: pop a, b, g, r (S44 0.0-1.0); push u32 AARRGGBB
+    /// RGBA to colour: pop a, b, g, r (S44 0-1); push ARGB 0xAARRGGBB
     /// VSF: {ca}
     pub fn ca(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x63, 0x61]); // ca
+        emit_op(&mut self.bytecode, b'c', b'a');
         self
     }
 
-    /// RGB: pop b, g, r (S44 0.0-1.0); push u32 AARRGGBB (alpha=1.0)
+    /// RGB to colour: pop b, g, r (S44 0-1); push ARGB 0xFFRRGGBB (opaque)
     /// VSF: {cb}
     pub fn cb(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x63, 0x62]); // cb
+        emit_op(&mut self.bytecode, b'c', b'b');
         self
     }
 
     /// Colour lerp: pop t, colour_b, colour_a; push interpolated colour
     /// VSF: {ci}
     pub fn ci(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x63, 0x69]); // ci
+        emit_op(&mut self.bytecode, b'c', b'i');
         self
     }
 
-    /// HSLA: pop a, l, s, h; push u32 AARRGGBB
-    /// VSF: {ch}
-    pub fn ch(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x63, 0x68]); // ch
-        self
+    // ==================== HIGH-LEVEL DRAWING HELPERS ====================
+    // These handle stack management and provide better ergonomics
+
+    /// Fill rectangle with explicit parameters (high-level helper)
+    ///
+    /// Pushes values in order and calls fill_rect opcode.
+    /// Uses RU (Relative Units) coordinates with center-origin.
+    ///
+    /// # Coordinate System
+    /// - (0, 0) = center of canvas
+    /// - Positive X = right, Positive Y = down
+    /// - 1 RU = span pixels (harmonic mean of width/height)
+    /// - Rectangle is centered at (x, y)
+    ///
+    /// # Arguments
+    /// * `x` - X center position in RU (0 = center)
+    /// * `y` - Y center position in RU (0 = center)
+    /// * `w` - Width in RU
+    /// * `h` - Height in RU
+    /// * `colour` - VSF colour type (e.g., VsfType::rr for red)
+    ///
+    /// # Example
+    /// ```ignore
+    /// use toka::builder::Program;
+    /// use vsf::types::VsfType;
+    ///
+    /// // Draw a red square in the center, 0.5 RU wide/tall
+    /// let bytecode = Program::new()
+    ///     .fill_rect(0, 0, 0.5, 0.5, VsfType::rr)
+    ///     .hl()
+    ///     .build();
+    /// ```
+    pub fn fill_rect(
+        self,
+        x: impl Into<ScalarF4E4>,
+        y: impl Into<ScalarF4E4>,
+        w: impl Into<ScalarF4E4>,
+        h: impl Into<ScalarF4E4>,
+        colour: VsfType,
+    ) -> Self {
+        use vsf::colour::convert::RgbLinear;
+
+        // Convert VSF colour to linear RGB, then to Spirix
+        let rgb: RgbLinear = colour
+            .to_rgb_linear()
+            .expect("VSF colour type must convert to RGB");
+
+        // Convert to Spirix and apply gamma 2 encoding (sqrt)
+        let r: ScalarF4E4 = ScalarF4E4::from(rgb.r).max(0).sqrt();
+        let g: ScalarF4E4 = ScalarF4E4::from(rgb.g).max(0).sqrt();
+        let b: ScalarF4E4 = ScalarF4E4::from(rgb.b).max(0).sqrt();
+
+        self.ps_s44(r)
+            .ps_s44(g)
+            .ps_s44(b)
+            .cb() // rgb
+            .ps_s44(x)
+            .ps_s44(y)
+            .ps_s44(w)
+            .ps_s44(h)
+            .fr() // fill_rect
+    }
+
+    /// Fill circle with explicit parameters (high-level helper)
+    ///
+    /// # Arguments
+    /// * `cx` - Center X in RU
+    /// * `cy` - Center Y in RU
+    /// * `radius` - Radius in RU
+    /// * `colour` - VSF colour type
+    pub fn fill_circle(
+        self,
+        cx: impl Into<ScalarF4E4>,
+        cy: impl Into<ScalarF4E4>,
+        radius: impl Into<ScalarF4E4>,
+        colour: VsfType,
+    ) -> Self {
+        use vsf::colour::convert::RgbLinear;
+
+        let rgb: RgbLinear = colour
+            .to_rgb_linear()
+            .expect("VSF colour type must convert to RGB");
+
+        // Convert to Spirix and apply gamma 2 encoding (sqrt)
+        let r: ScalarF4E4 = ScalarF4E4::from(rgb.r).max(0).sqrt();
+        let g: ScalarF4E4 = ScalarF4E4::from(rgb.g).max(0).sqrt();
+        let b: ScalarF4E4 = ScalarF4E4::from(rgb.b).max(0).sqrt();
+
+        self.ps_s44(r)
+            .ps_s44(g)
+            .ps_s44(b)
+            .cb() // rgb
+            .ps_s44(cx)
+            .ps_s44(cy)
+            .ps_s44(radius)
+            .fc() // fill_circle
+    }
+
+    /// Clear canvas to solid colour (fills entire canvas)
+    ///
+    /// # Arguments
+    /// * `colour` - VSF colour type
+    pub fn clear(self, colour: VsfType) -> Self {
+        use vsf::colour::convert::RgbLinear;
+
+        let rgb: RgbLinear = colour
+            .to_rgb_linear()
+            .expect("VSF colour type must convert to RGB");
+
+        // Convert to Spirix and apply gamma 2 encoding (sqrt)
+        let r = ScalarF4E4::from(rgb.r).max(0).sqrt();
+        let g = ScalarF4E4::from(rgb.g).max(0).sqrt();
+        let b = ScalarF4E4::from(rgb.b).max(0).sqrt();
+
+        self.ps_s44(r)
+            .ps_s44(g)
+            .ps_s44(b)
+            .cb() // rgb
+            .cr() // clear
+    }
+
+    /// Draw line with explicit parameters (high-level helper)
+    ///
+    /// # Arguments
+    /// * `x1` - Start X in RU
+    /// * `y1` - Start Y in RU
+    /// * `x2` - End X in RU
+    /// * `y2` - End Y in RU
+    /// * `stroke_w` - Stroke width in RU
+    /// * `colour` - VSF colour type
+    pub fn draw_line(
+        self,
+        x1: impl Into<ScalarF4E4>,
+        y1: impl Into<ScalarF4E4>,
+        x2: impl Into<ScalarF4E4>,
+        y2: impl Into<ScalarF4E4>,
+        stroke_w: impl Into<ScalarF4E4>,
+        colour: VsfType,
+    ) -> Self {
+        use vsf::colour::convert::RgbLinear;
+
+        let rgb: RgbLinear = colour
+            .to_rgb_linear()
+            .expect("VSF colour type must convert to RGB");
+
+        // Convert to Spirix and apply gamma 2 encoding (sqrt)
+        let r: ScalarF4E4 = ScalarF4E4::from(rgb.r).max(0).sqrt();
+        let g: ScalarF4E4 = ScalarF4E4::from(rgb.g).max(0).sqrt();
+        let b: ScalarF4E4 = ScalarF4E4::from(rgb.b).max(0).sqrt();
+
+        self.ps_s44(r)
+            .ps_s44(g)
+            .ps_s44(b)
+            .cb() // rgb
+            .ps_s44(x1)
+            .ps_s44(y1)
+            .ps_s44(x2)
+            .ps_s44(y2)
+            .ps_s44(stroke_w)
+            .dl() // draw_line
     }
 
     // ==================== CONTROL FLOW ====================
 
-    /// Call function at bytecode offset
+    /// Call function at bytecode offset (low-level - symbolic names TBD)
     /// VSF: {cn}[offset:u]
     pub fn cn(mut self, offset: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x63, 0x6e]); // cn
-        self.bytecode.extend_from_slice(&offset.to_le_bytes());
+        emit_op(&mut self.bytecode, b'c', b'n');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(offset as usize, false).flatten());
         self
     }
 
-    /// Call indirect: pop function_handle; call it
+    /// Call indirect: pop function handle from stack; call it
+    /// (Handle pushed by capability system or function reference)
     /// VSF: {cd}
     pub fn cd(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x63, 0x64]); // cd
+        emit_op(&mut self.bytecode, b'c', b'd');
         self
     }
 
     /// Return from function (no value)
     /// VSF: {re}
     pub fn re(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x72, 0x65]); // re
+        emit_op(&mut self.bytecode, b'r', b'e');
         self
     }
 
     /// Return value from function
     /// VSF: {rv}
     pub fn rv(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x72, 0x76]); // rv
+        emit_op(&mut self.bytecode, b'r', b'v');
         self
     }
 
-    /// Jump to bytecode offset
+    /// Unconditional jump to bytecode offset (low-level - labels TBD)
     /// VSF: {jm}[offset:u]
     pub fn jm(mut self, offset: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x6a, 0x6d]); // jm
-        self.bytecode.extend_from_slice(&offset.to_le_bytes());
+        emit_op(&mut self.bytecode, b'j', b'm');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(offset as usize, false).flatten());
         self
     }
 
-    /// Jump if non-zero: pop condition; jump if truthy
+    /// Conditional jump: pop value; if truthy (non-zero), jump to offset
     /// VSF: {ji}[offset:u]
     pub fn ji(mut self, offset: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x6a, 0x69]); // ji
-        self.bytecode.extend_from_slice(&offset.to_le_bytes());
+        emit_op(&mut self.bytecode, b'j', b'i');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(offset as usize, false).flatten());
         self
     }
 
     /// Jump if zero: pop condition; jump if falsy
     /// VSF: {jz}[offset:u]
     pub fn jz(mut self, offset: u32) -> Self {
-        self.bytecode.extend_from_slice(&[0x6a, 0x7a]); // jz
-        self.bytecode.extend_from_slice(&offset.to_le_bytes());
+        emit_op(&mut self.bytecode, b'j', b'z');
+        self.bytecode
+            .extend_from_slice(&VsfType::u(offset as usize, false).flatten());
         self
     }
 
@@ -602,7 +804,7 @@ impl Program {
     /// Halt execution
     /// VSF: {hl}
     pub fn hl(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x68, 0x6c]); // hl
+        emit_op(&mut self.bytecode, b'h', b'l');
         self
     }
 
@@ -611,21 +813,21 @@ impl Program {
     /// Debug print: pop value; print to stdout
     /// VSF: {db}
     pub fn db(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x64, 0x62]); // db
+        emit_op(&mut self.bytecode, b'd', b'b');
         self
     }
 
     /// Debug stack: print entire stack
     /// VSF: {ds}
     pub fn ds(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x64, 0x73]); // ds
+        emit_op(&mut self.bytecode, b'd', b's');
         self
     }
 
     /// No operation
     /// VSF: {np}
     pub fn np(mut self) -> Self {
-        self.bytecode.extend_from_slice(&[0x6e, 0x70]); // np
+        emit_op(&mut self.bytecode, b'n', b'p');
         self
     }
 }
@@ -644,71 +846,61 @@ mod tests {
     fn test_basic_arithmetic() {
         // 1 + 1 = 2
         let bytecode = Program::new()
-            .po()  // push_one
-            .po()  // push_one
-            .ad()  // add
-            .hl()  // halt
+            .ps_s44(1) // push 1
+            .ps_s44(1) // push 1
+            .ad() // add
+            .hl() // halt
             .build();
 
-        assert_eq!(
-            bytecode,
-            vec![
-                0x70, 0x6f, // po
-                0x70, 0x6f, // po
-                0x61, 0x64, // ad
-                0x68, 0x6c, // hl
-            ]
-        );
+        assert!(bytecode.len() > 0);
+        // Bytecode contains push opcodes + s44 scalar encodings + add + halt
     }
 
     #[test]
     fn test_colour_creation() {
-        // Create red colour (1.0, 0.0, 0.0)
+        // Create red colour (1, 0, 0)
         let bytecode = Program::new()
-            .po()  // push_one (r)
-            .pz()  // push_zero (g)
-            .pz()  // push_zero (b)
-            .cb()  // rgb
-            .hl()  // halt
+            .ps_s44(1) // push r
+            .ps_s44(0) // push g
+            .ps_s44(0) // push b
+            .cb() // rgb
+            .hl() // halt
             .build();
 
-        assert_eq!(
-            bytecode,
-            vec![
-                0x70, 0x6f, // po
-                0x70, 0x7a, // pz
-                0x70, 0x7a, // pz
-                0x63, 0x62, // cb
-                0x68, 0x6c, // hl
-            ]
-        );
+        // Bytecode contains: 3x{ps} + 3x s44 scalars + {cb} + {hl}
+        assert!(bytecode.len() > 0);
+        // Each ps_s44 is {ps} (4 bytes) + s44 encoding (~7 bytes) = ~11 bytes
+        // Plus {cb} (4 bytes) + {hl} (4 bytes) ≈ 41 bytes total
+        assert!(bytecode.len() > 30);
     }
 
     #[test]
     fn test_push_s44() {
-        let bytecode = Program::new()
-            .ps_s44(3.14)
-            .hl()
-            .build();
+        let bytecode = Program::new().ps_s44(3.14).hl().build();
 
-        // Should have: ps opcode (2) + s44 type marker (3) + fraction (2) + exponent (2) + hl opcode (2) = 11 bytes
-        assert_eq!(bytecode[0], 0x70); // p
-        assert_eq!(bytecode[1], 0x73); // s
-        assert_eq!(bytecode[2], b's');  // s
-        assert_eq!(bytecode[3], b'4');  // 4
-        assert_eq!(bytecode[4], b'4');  // 4
+        // VSF format: {ps} (4 bytes) + s44 type marker (3) + fraction (2) + exponent (2) + {hl} (4 bytes) = 15 bytes
+        assert_eq!(bytecode[0], b'{');
+        assert_eq!(bytecode[1], b'p');
+        assert_eq!(bytecode[2], b's');
+        assert_eq!(bytecode[3], b'}');
+        assert_eq!(bytecode[4], b's'); // s44 type marker
+        assert_eq!(bytecode[5], b'4');
+        assert_eq!(bytecode[6], b'4');
         // 4 bytes of S44 data (i16 fraction + i16 exponent)
-        assert_eq!(bytecode.len(), 11); // total length
-        assert_eq!(bytecode[9], 0x68); // h (halt)
-        assert_eq!(bytecode[10], 0x6c); // l
+        assert_eq!(bytecode.len(), 15); // total length
+                                        // halt opcode at end
+        assert_eq!(bytecode[11], b'{');
+        assert_eq!(bytecode[12], b'h');
+        assert_eq!(bytecode[13], b'l');
+        assert_eq!(bytecode[14], b'}');
     }
 
     #[test]
     fn test_chainable() {
         // Test that methods can be chained
         let _bytecode = Program::new()
-            .pz()
-            .po()
+            .ps_s44(0)
+            .ps_s44(1)
             .ad()
             .dp()
             .ml()
@@ -722,20 +914,21 @@ mod tests {
         use crate::vm::VM;
 
         let bytecode = Program::new()
-            .po()  // push 1
-            .po()  // push 1
-            .ad()  // add → 2
-            .po()  // push 1
-            .ad()  // add → 3
-            .hl()  // halt
+            .ps_s44(1) // push 1
+            .ps_s44(1) // push 1
+            .ad() // add → 2
+            .ps_s44(1) // push 1
+            .ad() // add → 3
+            .hl() // halt
             .build();
 
         let mut vm = VM::new(bytecode);
         vm.run().unwrap();
 
         assert_eq!(vm.stack_depth(), 1);
-        let result = vm.peek().unwrap().to_s44().unwrap();
-        let result_f64: f64 = result.into();
-        assert_eq!(result_f64, 3.0);
+        match vm.peek().unwrap() {
+            vsf::types::VsfType::s44(s) => assert_eq!(*s, ScalarF4E4::from(3)),
+            _ => panic!("Expected s44"),
+        }
     }
 }

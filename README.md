@@ -4,7 +4,7 @@
   <h3>Capability-Bounded Stack VM for Secure Distributed Computing</h3>
 </div>
 
-**Status:** v0.0.0 - Foundation Complete
+**Status:** v0.0.0 - WASM Portal Working (18/19 tests passing)
 
 ## Overview
 
@@ -12,12 +12,23 @@ Toka is a stack-based virtual machine designed for executing signed, capability-
 
 **Key Features:**
 - **Spirix-Native Arithmetic** - Two's complement floating point (no IEEE-754)
+- **Content-Addressed Functions** - BLAKE3 hash-based deduplication and jumps
 - **Capability-Based Security** - Fine-grained permission system
-- **Cryptographic Verification** - BLAKE3 hashes, ed25519 signatures
+- **Cryptographic Verification** - BLAKE3 provenance (hp), integrity (hb), ed25519 signatures
 - **Deterministic Execution** - Same bytecode, same results, everywhere
 - **VSF Bytecode** - Compact, self-describing binary format
 - **Handle-Only Memory** - No pointers, no buffer overflows
-- **Viewport Graphics** - Resolution-independent rendering (0.0-1.0 coords)
+- **RU Graphics** - Resolution-independent Relative Units (harmonic mean scaling)
+
+**Currently Working (v0.0.0):**
+- ✅ Core VM with stack operations, arithmetic, logic
+- ✅ VSF bytecode parsing and execution
+- ✅ BLAKE3 content-addressed function calls
+- ✅ Canvas rendering with RU coordinates
+- ✅ ARGB color system (Spirix F4E4 RGBA internally)
+- ✅ WASM portal in Chrome (localhost:8000)
+- ✅ Panic hook and debug logging
+- ✅ 18/19 tests passing
 
 ## Architecture
 
@@ -79,6 +90,39 @@ VSF File:
 3. Capabilities declared explicitly
 4. Verification happens once on load
 5. Execution cannot escape capability bounds
+
+### Content-Addressed Control Flow
+
+**"If you know the hash, you can call it."**
+
+Functions are identified by BLAKE3 hash of their bytecode, enabling:
+
+**Deduplication:**
+- Multiple copies of identical functions → single hash → one execution path
+- Automatic code reuse without explicit sharing
+- Capsules only store unique function bodies
+
+**Hash-Based Jumps:**
+```rust
+// VM maintains function_map: HashMap<[u8; 32], usize>
+// Call by hash (32-byte BLAKE3):
+{cn}hp3{31}{hash_bytes}  // Call function at hash address
+
+// Example: calling shared math library
+let sin_hash = blake3("fn sin(x) { ... }");
+vm.call(sin_hash);  // Works if any loaded capsule contains it
+```
+
+**Benefits:**
+- **No duplication overhead** - common functions shared automatically
+- **Content-based addressing** - functions addressed by what they are, not where
+- **Immutable by design** - hash changes if code changes
+- **Cryptographically secure** - BLAKE3 collision-resistant (2^128 security)
+
+**Use cases:**
+- Shared standard library (math, string ops, crypto)
+- Plugin systems (hash identifies compatible interface)
+- Distributed computation (send hash instead of code)
 
 ## Type System
 
@@ -252,37 +296,56 @@ Example:
 {ht}                 # Halt
 ```
 
-## Viewport Graphics
+## RU Graphics (Relative Units)
 
-All drawing uses **viewport-relative coordinates** (0.0-1.0):
+All drawing uses **Relative Units** - a resolution-independent coordinate system based on harmonic mean:
 
+**Core Concept:**
+```rust
+span = 2wh / (w+h)  // Harmonic mean of width and height
+1 RU = span pixels  // Base unit scales smoothly through aspect ratios
+ru_multiplier       // User zoom (default 1, range 0.125-8)
 ```
-(0.0, 0.0) ────────────────── (1.0, 0.0)
-    │                              │
-    │                              │
-    │         VIEWPORT             │
-    │                              │
-    │                              │
-(0.0, 1.0) ────────────────── (1.0, 1.0)
+
+**Coordinate System:**
+```
+            -Y
+             ↑
+             │
+-X ←─────(0,0)─────→ +X  (center of canvas)
+             │
+             ↓
+            +Y
+
+1 RU from center reaches edge of smaller dimension
+```
+
+**Examples:**
+```rust
+// 800×600 canvas:
+span = 2×800×600 / (800+600) = 686 pixels
+
+// 1920×1080 canvas:
+span = 2×1920×1080 / (1920+1080) = 1382 pixels
+
+// Drawing a circle at center with radius 0.5 RU:
+{ps}s44{0}     // x = 0
+{ps}s44{0}     // y = 0
+{ps}s44{0.5}   // radius = 0.5 RU
+{ps}u5{0xFF0000FF}  // color = blue ARGB
+{fc}           // fill_circle
 ```
 
 **Benefits:**
-- Same layout scales to phone/tablet/desktop/projector
-- No media queries needed
-- No absolute pixel calculations
-- Resolution-independent by design
+- **Aspect-ratio aware** - Layout adapts naturally to screen shape
+- **User scalable** - Change `ru` multiplier to zoom entire UI
+- **Pixel-perfect when needed** - Use pixel coords for exact placement
+- **Same bytecode, any resolution** - Phone to 4K to projector
 
-**Font Size Calculation:**
-```rust
-viewport_area = width_px × height_px
-font_size_px = sqrt(size_fraction × viewport_area)
-```
-
-Example: `size=0.01` (1% of viewport) on 1920×1080 screen:
-```
-area = 1920 × 1080 = 2,073,600
-font_px = sqrt(0.01 × 2,073,600) = sqrt(20,736) ≈ 144px
-```
+**Color Format:**
+- **ARGB:** 0xAARRGGBB (Alpha, Red, Green, Blue)
+- Canvas uses Spirix F4E4 RGBA internally (0.0-1.0 per channel)
+- Drawing opcodes accept u32 ARGB or push 4× s44 RGBA components
 
 ## Capability System
 

@@ -1,20 +1,120 @@
 //! Toka VM execution engine
 //!
 //! Stack-based VM with:
-//! - Value stack (operands)
+//! - VsfType stack (no lossy conversion or promotions/demotions - types are preserved)
 //! - Local variables (function-scoped)
 //! - Instruction pointer
 //! - Capability-checked handle system
+//!
+//! # Type Safety
+//!
+//! **No implicit type conversion.** If you push an S44 and an S43, you cannot
+//! add them - you get a runtime error. This mirrors Rust's compile-time type
+//! safety at runtime. Spirix handles all arithmetic with proper type checking.
+//!
+//! # Bytecode Format
+//! The bytecode is a valid VSF stream where:
+//! - `{xx}` = Toka opcodes (two lowercase letters)
+//! - Other VSF types = data (pushed by {ps} opcode)
+//!
+//! # Type Safety
+//! Type checking happens at build time via Rust's type system in the builder API.
+//! Runtime trusts the bytecode and relies on Rust panics/bounds checks for safety.
 
 use crate::canvas::Canvas;
 use crate::opcode::Opcode;
-use crate::value::Value;
 use spirix::ScalarF4E4;
+use std::collections::HashMap;
+// Note: We use VSF RGB directly, NOT sRGB conversion
+// WASM wrapper handles sRGB conversion on Chrome/browser side
+use vsf::decoding::parse::parse as vsf_parse;
+use vsf::types::VsfType;
+
+/// Macro to generate arithmetic operations for all Spirix types (Scalars + Circles)
+/// Handles 25 Scalar types (s33-s77) + 25 Circle types (c33-c77) = 50 types
+/// Optimized for F4E4 (ScalarF4E4/CircleF4E4) - faster than IEEE, deterministic!
+macro_rules! spirix_binop {
+    ($lhs:expr, $rhs:expr, $op:tt, $op_name:expr) => {
+        match (&$lhs, &$rhs) {
+            // ========== SCALARS (25 types) ==========
+            (VsfType::s33(a), VsfType::s33(b)) => Ok(VsfType::s33(a $op b)),
+            (VsfType::s34(a), VsfType::s34(b)) => Ok(VsfType::s34(a $op b)),
+            (VsfType::s35(a), VsfType::s35(b)) => Ok(VsfType::s35(a $op b)),
+            (VsfType::s36(a), VsfType::s36(b)) => Ok(VsfType::s36(a $op b)),
+            (VsfType::s37(a), VsfType::s37(b)) => Ok(VsfType::s37(a $op b)),
+            (VsfType::s43(a), VsfType::s43(b)) => Ok(VsfType::s43(a $op b)),
+            (VsfType::s44(a), VsfType::s44(b)) => Ok(VsfType::s44(a $op b)), // ← F4E4 (optimized!)
+            (VsfType::s45(a), VsfType::s45(b)) => Ok(VsfType::s45(a $op b)),
+            (VsfType::s46(a), VsfType::s46(b)) => Ok(VsfType::s46(a $op b)),
+            (VsfType::s47(a), VsfType::s47(b)) => Ok(VsfType::s47(a $op b)),
+            (VsfType::s53(a), VsfType::s53(b)) => Ok(VsfType::s53(a $op b)),
+            (VsfType::s54(a), VsfType::s54(b)) => Ok(VsfType::s54(a $op b)),
+            (VsfType::s55(a), VsfType::s55(b)) => Ok(VsfType::s55(a $op b)),
+            (VsfType::s56(a), VsfType::s56(b)) => Ok(VsfType::s56(a $op b)),
+            (VsfType::s57(a), VsfType::s57(b)) => Ok(VsfType::s57(a $op b)),
+            (VsfType::s63(a), VsfType::s63(b)) => Ok(VsfType::s63(a $op b)),
+            (VsfType::s64(a), VsfType::s64(b)) => Ok(VsfType::s64(a $op b)),
+            (VsfType::s65(a), VsfType::s65(b)) => Ok(VsfType::s65(a $op b)),
+            (VsfType::s66(a), VsfType::s66(b)) => Ok(VsfType::s66(a $op b)),
+            (VsfType::s67(a), VsfType::s67(b)) => Ok(VsfType::s67(a $op b)),
+            (VsfType::s73(a), VsfType::s73(b)) => Ok(VsfType::s73(a $op b)),
+            (VsfType::s74(a), VsfType::s74(b)) => Ok(VsfType::s74(a $op b)),
+            (VsfType::s75(a), VsfType::s75(b)) => Ok(VsfType::s75(a $op b)),
+            (VsfType::s76(a), VsfType::s76(b)) => Ok(VsfType::s76(a $op b)),
+            (VsfType::s77(a), VsfType::s77(b)) => Ok(VsfType::s77(a $op b)),
+
+            // ========== CIRCLES (25 types) - for (x,y) coordinates! ==========
+            (VsfType::c33(a), VsfType::c33(b)) => Ok(VsfType::c33(a $op b)),
+            (VsfType::c34(a), VsfType::c34(b)) => Ok(VsfType::c34(a $op b)),
+            (VsfType::c35(a), VsfType::c35(b)) => Ok(VsfType::c35(a $op b)),
+            (VsfType::c36(a), VsfType::c36(b)) => Ok(VsfType::c36(a $op b)),
+            (VsfType::c37(a), VsfType::c37(b)) => Ok(VsfType::c37(a $op b)),
+            (VsfType::c43(a), VsfType::c43(b)) => Ok(VsfType::c43(a $op b)),
+            (VsfType::c44(a), VsfType::c44(b)) => Ok(VsfType::c44(a $op b)), // ← F4E4 (optimized!)
+            (VsfType::c45(a), VsfType::c45(b)) => Ok(VsfType::c45(a $op b)),
+            (VsfType::c46(a), VsfType::c46(b)) => Ok(VsfType::c46(a $op b)),
+            (VsfType::c47(a), VsfType::c47(b)) => Ok(VsfType::c47(a $op b)),
+            (VsfType::c53(a), VsfType::c53(b)) => Ok(VsfType::c53(a $op b)),
+            (VsfType::c54(a), VsfType::c54(b)) => Ok(VsfType::c54(a $op b)),
+            (VsfType::c55(a), VsfType::c55(b)) => Ok(VsfType::c55(a $op b)),
+            (VsfType::c56(a), VsfType::c56(b)) => Ok(VsfType::c56(a $op b)),
+            (VsfType::c57(a), VsfType::c57(b)) => Ok(VsfType::c57(a $op b)),
+            (VsfType::c63(a), VsfType::c63(b)) => Ok(VsfType::c63(a $op b)),
+            (VsfType::c64(a), VsfType::c64(b)) => Ok(VsfType::c64(a $op b)),
+            (VsfType::c65(a), VsfType::c65(b)) => Ok(VsfType::c65(a $op b)),
+            (VsfType::c66(a), VsfType::c66(b)) => Ok(VsfType::c66(a $op b)),
+            (VsfType::c67(a), VsfType::c67(b)) => Ok(VsfType::c67(a $op b)),
+            (VsfType::c73(a), VsfType::c73(b)) => Ok(VsfType::c73(a $op b)),
+            (VsfType::c74(a), VsfType::c74(b)) => Ok(VsfType::c74(a $op b)),
+            (VsfType::c75(a), VsfType::c75(b)) => Ok(VsfType::c75(a $op b)),
+            (VsfType::c76(a), VsfType::c76(b)) => Ok(VsfType::c76(a $op b)),
+            (VsfType::c77(a), VsfType::c77(b)) => Ok(VsfType::c77(a $op b)),
+
+            // Type mismatch
+            _ => Err(format!(
+                "Type mismatch in {}: {:?} {} {:?}",
+                $op_name,
+                type_name(&$lhs),
+                stringify!($op),
+                type_name(&$rhs)
+            )),
+        }
+    };
+}
+
+/// Call frame for function calls
+#[derive(Debug, Clone)]
+pub struct CallFrame {
+    /// Return address (IP to resume after function returns)
+    pub return_ip: usize,
+    /// Number of local variable frames to preserve
+    pub local_count: usize,
+}
 
 /// VM execution state
 pub struct VM {
-    /// Value stack (operands pushed/popped here)
-    stack: Vec<Value>,
+    /// Value stack (VsfType values - no lossy conversion)
+    stack: Vec<VsfType>,
 
     /// Bytecode being executed
     bytecode: Vec<u8>,
@@ -24,7 +124,14 @@ pub struct VM {
 
     /// Local variables (function-scoped)
     /// Outer vec is call stack frames, inner vec is locals within frame
-    locals: Vec<Vec<Value>>,
+    locals: Vec<Vec<VsfType>>,
+
+    /// Call stack for function calls (return addresses)
+    call_stack: Vec<CallFrame>,
+
+    /// Content-addressed function map: BLAKE3 hash → instruction pointer
+    /// "If you know the hash, you can call it" - capability by knowledge
+    function_map: HashMap<[u8; 32], usize>,
 
     /// Whether execution has halted
     halted: bool,
@@ -34,7 +141,14 @@ pub struct VM {
 }
 
 impl VM {
-    /// Create a new VM with the given bytecode and default canvas size (800x600)
+    /// Create a new VM with the given bytecode and canvas size
+    ///
+    /// Note: Canvas dimensions are just the pixel buffer size.
+    /// RU (Relative Units) handles all coordinate mapping automatically,
+    /// so the same bytecode renders correctly at ANY resolution.
+    ///
+    /// For testing only - use with_canvas() in production.
+    #[cfg(test)]
     pub fn new(bytecode: Vec<u8>) -> Self {
         Self::with_canvas(bytecode, 800, 600)
     }
@@ -46,9 +160,27 @@ impl VM {
             bytecode,
             ip: 0,
             locals: vec![Vec::new()], // Start with one frame
+            call_stack: Vec::new(),
+            function_map: HashMap::new(),
             halted: false,
             canvas: Canvas::new(width, height),
         }
+    }
+
+    /// Register a function by its BLAKE3 hash
+    ///
+    /// Content-addressed functions: "If you know the hash, you can call it"
+    /// Hash is BLAKE3 of the function bytecode body
+    pub fn register_function(&mut self, hash: [u8; 32], ip: usize) {
+        self.function_map.insert(hash, ip);
+    }
+
+    /// Look up function IP by hash
+    fn resolve_function(&self, hash: &[u8; 32]) -> Result<usize, String> {
+        self.function_map
+            .get(hash)
+            .copied()
+            .ok_or_else(|| format!("Unknown function hash: {:?}", hash))
     }
 
     /// Execute until halt or error
@@ -61,48 +193,61 @@ impl VM {
 
     /// Execute one instruction
     pub fn step(&mut self) -> Result<(), String> {
-        if self.ip + 1 >= self.bytecode.len() {
-            return Err("Unexpected end of bytecode".to_string());
+        let ip_before = self.ip;
+        if self.ip >= self.bytecode.len() {
+            return Err(format!("[IP:{}] Unexpected end of bytecode", ip_before));
         }
 
-        // Read opcode (2 bytes)
-        let op_bytes = [self.bytecode[self.ip], self.bytecode[self.ip + 1]];
-        self.ip += 2;
+        let vsf_value = vsf_parse(&self.bytecode, &mut self.ip)
+            .map_err(|e| format!("[IP:{}] VSF parse error: {}", ip_before, e))?;
 
-        let opcode = Opcode::from_bytes(&op_bytes)
-            .ok_or_else(|| format!("Unknown opcode: {:02x}{:02x}", op_bytes[0], op_bytes[1]))?;
-
-        // Execute the opcode
-        self.execute(opcode)?;
+        match vsf_value {
+            VsfType::op(a, b) => {
+                let opcode = Opcode::from_bytes(&[a, b]).ok_or_else(|| {
+                    format!(
+                        "[IP:{}] Unknown opcode: {}{}",
+                        ip_before, a as char, b as char
+                    )
+                })?;
+                self.execute(opcode)
+                    .map_err(|e| format!("[IP:{}] {}", ip_before, e))?;
+            }
+            _ => {
+                return Err(format!(
+                    "[IP:{}] Expected opcode, got VSF type: {:?}",
+                    ip_before, vsf_value
+                ));
+            }
+        }
 
         Ok(())
     }
 
-    /// Execute a single opcode
+    fn pop(&mut self) -> Result<VsfType, String> {
+        self.stack
+            .pop()
+            .ok_or_else(|| "Stack underflow".to_string())
+    }
+
     fn execute(&mut self, opcode: Opcode) -> Result<(), String> {
         match opcode {
-            // Stack manipulation
             Opcode::push => {
-                // TODO: Read VSF-encoded value from bytecode
-                // For now, placeholder - will implement VSF decoding next
-                return Err("push not yet implemented".to_string());
-            }
-
-            Opcode::push_zero => {
-                self.stack.push(Value::S44(ScalarF4E4::from(0.0)));
-            }
-
-            Opcode::push_one => {
-                self.stack.push(Value::S44(ScalarF4E4::from(1.0)));
+                if self.ip >= self.bytecode.len() {
+                    return Err("Bytecode truncated in push".to_string());
+                }
+                let vsf_value = vsf_parse(&self.bytecode, &mut self.ip)
+                    .map_err(|e| format!("push: failed to parse VSF value: {}", e))?;
+                self.stack.push(vsf_value);
             }
 
             Opcode::pop => {
-                self.stack.pop()
-                    .ok_or_else(|| "Stack underflow on pop".to_string())?;
+                self.pop()?;
             }
 
             Opcode::dup => {
-                let val = self.stack.last()
+                let val = self
+                    .stack
+                    .last()
                     .ok_or_else(|| "Stack underflow on dup".to_string())?
                     .clone();
                 self.stack.push(val);
@@ -116,152 +261,724 @@ impl VM {
                 self.stack.swap(len - 1, len - 2);
             }
 
-            // Arithmetic (S44)
             Opcode::add => {
-                let b = self.pop_s44()?;
-                let a = self.pop_s44()?;
-                self.stack.push(Value::S44(a + b));
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_add(lhs, rhs)?;
+                self.stack.push(result);
             }
 
             Opcode::sub => {
-                let b = self.pop_s44()?;
-                let a = self.pop_s44()?;
-                self.stack.push(Value::S44(a - b));
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_sub(lhs, rhs)?;
+                self.stack.push(result);
             }
 
             Opcode::mul => {
-                let b = self.pop_s44()?;
-                let a = self.pop_s44()?;
-                self.stack.push(Value::S44(a * b));
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_mul(lhs, rhs)?;
+                self.stack.push(result);
             }
 
             Opcode::div => {
-                let b = self.pop_s44()?;
-                let a = self.pop_s44()?;
-                self.stack.push(Value::S44(a / b));
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_div(lhs, rhs)?;
+                self.stack.push(result);
             }
 
             Opcode::neg => {
-                let a = self.pop_s44()?;
-                self.stack.push(Value::S44(-a));
+                let val = self.pop()?;
+                let result = self.execute_neg(val)?;
+                self.stack.push(result);
             }
 
-            // Comparison (returns 1.0 or 0.0 as S44)
             Opcode::eq => {
-                let b = self.pop_s44()?;
-                let a = self.pop_s44()?;
-                let result = if a == b { 1.0 } else { 0.0 };
-                self.stack.push(Value::S44(ScalarF4E4::from(result)));
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_eq(lhs, rhs)?;
+                self.stack.push(result);
             }
 
             Opcode::lt => {
-                let b = self.pop_s44()?;
-                let a = self.pop_s44()?;
-                let result = if a < b { 1.0 } else { 0.0 };
-                self.stack.push(Value::S44(ScalarF4E4::from(result)));
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_lt(lhs, rhs)?;
+                self.stack.push(result);
             }
 
-            // Control flow
+            // ==================== CONTROL FLOW (Content-Addressed) ====================
+            Opcode::jump => {
+                // Pop hash target and jump to it
+                let target = self.pop()?;
+                match target {
+                    VsfType::hb(hash_vec) => {
+                        let hash: [u8; 32] = hash_vec
+                            .try_into()
+                            .map_err(|_| "Jump hash must be 32 bytes (BLAKE3)")?;
+                        let target_ip = self.resolve_function(&hash)?;
+                        self.ip = target_ip;
+                    }
+                    _ => return Err(format!("Jump requires hb (BLAKE3 hash), got {:?}", target)),
+                }
+            }
+
+            Opcode::jump_if => {
+                // Pop target hash, then condition
+                let target = self.pop()?;
+                let condition = self.pop()?;
+
+                // Check if condition is truthy (non-zero)
+                let is_truthy = match &condition {
+                    VsfType::s44(v) => !v.is_zero(),
+                    VsfType::u3(v) => *v != 0,
+                    VsfType::u4(v) => *v != 0,
+                    VsfType::u5(v) => *v != 0,
+                    _ => {
+                        return Err(format!(
+                            "jump_if condition must be numeric, got {:?}",
+                            condition
+                        ))
+                    }
+                };
+
+                if is_truthy {
+                    match target {
+                        VsfType::hb(hash_vec) => {
+                            let hash: [u8; 32] = hash_vec
+                                .try_into()
+                                .map_err(|_| "Jump hash must be 32 bytes")?;
+                            let target_ip = self.resolve_function(&hash)?;
+                            self.ip = target_ip;
+                        }
+                        _ => return Err("Jump requires hb (BLAKE3 hash)".to_string()),
+                    }
+                }
+            }
+
+            Opcode::jump_zero => {
+                // Pop target hash, then condition
+                let target = self.pop()?;
+                let condition = self.pop()?;
+
+                let is_zero = match &condition {
+                    VsfType::s44(v) => v.is_zero(),
+                    VsfType::u3(v) => *v == 0,
+                    VsfType::u4(v) => *v == 0,
+                    VsfType::u5(v) => *v == 0,
+                    _ => {
+                        return Err(format!(
+                            "jump_zero condition must be numeric, got {:?}",
+                            condition
+                        ))
+                    }
+                };
+
+                if is_zero {
+                    match target {
+                        VsfType::hb(hash_vec) => {
+                            let hash: [u8; 32] = hash_vec
+                                .try_into()
+                                .map_err(|_| "Jump hash must be 32 bytes")?;
+                            let target_ip = self.resolve_function(&hash)?;
+                            self.ip = target_ip;
+                        }
+                        _ => return Err("Jump requires hb (BLAKE3 hash)".to_string()),
+                    }
+                }
+            }
+
+            Opcode::call => {
+                // Pop function hash
+                let target = self.pop()?;
+                match target {
+                    VsfType::hb(hash_vec) => {
+                        let hash: [u8; 32] = hash_vec
+                            .try_into()
+                            .map_err(|_| "Call hash must be 32 bytes")?;
+                        let target_ip = self.resolve_function(&hash)?;
+
+                        // Push call frame
+                        self.call_stack.push(CallFrame {
+                            return_ip: self.ip,
+                            local_count: self.locals.len(),
+                        });
+
+                        // Allocate new local frame for function
+                        self.locals.push(Vec::new());
+
+                        // Jump to function
+                        self.ip = target_ip;
+                    }
+                    _ => return Err("Call requires hb (BLAKE3 hash)".to_string()),
+                }
+            }
+
+            Opcode::call_indirect => {
+                // Pop handle (capability-based indirect call)
+                return Err(
+                    "call_indirect not yet implemented (requires capability system)".to_string(),
+                );
+            }
+
+            Opcode::return_ => {
+                // Pop call frame and return
+                let frame = self
+                    .call_stack
+                    .pop()
+                    .ok_or("Return without matching call")?;
+
+                // Restore locals to before call
+                self.locals.truncate(frame.local_count);
+
+                // Jump back to return address
+                self.ip = frame.return_ip;
+            }
+
+            Opcode::return_value => {
+                // Pop return value, then return
+                let return_val = self.pop()?;
+
+                let frame = self
+                    .call_stack
+                    .pop()
+                    .ok_or("Return without matching call")?;
+
+                // Restore locals
+                self.locals.truncate(frame.local_count);
+
+                // Push return value back
+                self.stack.push(return_val);
+
+                // Jump back
+                self.ip = frame.return_ip;
+            }
+
             Opcode::halt => {
                 self.halted = true;
             }
 
-            // Drawing operations (viewport coordinates 0.0-1.0)
             Opcode::clear => {
-                let colour = self.stack.pop()
-                    .ok_or_else(|| "Stack underflow on clear".to_string())?
-                    .to_u32()?;
-                self.canvas.clear(colour);
-            }
-
-            Opcode::fill_rect => {
-                let colour = self.stack.pop().ok_or("Stack underflow")?.to_u32()?;
-                let h = self.pop_s44()?;
-                let w = self.pop_s44()?;
-                let y = self.pop_s44()?;
-                let x = self.pop_s44()?;
-                self.canvas.fill_rect(x, y, w, h, colour);
-            }
-
-            Opcode::draw_text => {
-                let colour = self.stack.pop().ok_or("Stack underflow")?.to_u32()?;
-                let size = self.pop_s44()?;
-                let y = self.pop_s44()?;
-                let x = self.pop_s44()?;
-                let text = match self.stack.pop().ok_or("Stack underflow")? {
-                    Value::String(s) => s,
-                    _ => return Err("draw_text requires string".to_string()),
-                };
-                self.canvas.draw_text(x, y, size, &text, colour);
-            }
-
-            // Colour utilities
-            Opcode::rgba => {
+                // Pop RGBA as 4 separate s44 values (stack is LIFO, so reverse order)
                 let a = self.pop_s44()?;
                 let b = self.pop_s44()?;
                 let g = self.pop_s44()?;
                 let r = self.pop_s44()?;
-
-                // Convert 0.0-1.0 to 0-255
-                let r8 = (Into::<f64>::into(r).clamp(0.0, 1.0) * 255.0) as u32;
-                let g8 = (Into::<f64>::into(g).clamp(0.0, 1.0) * 255.0) as u32;
-                let b8 = (Into::<f64>::into(b).clamp(0.0, 1.0) * 255.0) as u32;
-                let a8 = (Into::<f64>::into(a).clamp(0.0, 1.0) * 255.0) as u32;
-
-                // AARRGGBB format
-                let colour = (a8 << 24) | (r8 << 16) | (g8 << 8) | b8;
-                self.stack.push(Value::U32(colour));
+                self.canvas.clear(r, g, b, a);
             }
 
-            Opcode::rgb => {
+            Opcode::fill_rect => {
+                let h = self.pop_s44()?;
+                let w = self.pop_s44()?;
+                let y = self.pop_s44()?;
+                let x = self.pop_s44()?;
+                let a = self.pop_s44()?;
                 let b = self.pop_s44()?;
                 let g = self.pop_s44()?;
                 let r = self.pop_s44()?;
-
-                // Convert 0.0-1.0 to 0-255, alpha = 255
-                let r8 = (Into::<f64>::into(r).clamp(0.0, 1.0) * 255.0) as u32;
-                let g8 = (Into::<f64>::into(g).clamp(0.0, 1.0) * 255.0) as u32;
-                let b8 = (Into::<f64>::into(b).clamp(0.0, 1.0) * 255.0) as u32;
-
-                // AARRGGBB format with full alpha
-                let colour = 0xFF000000 | (r8 << 16) | (g8 << 8) | b8;
-                self.stack.push(Value::U32(colour));
+                self.canvas.fill_rect(x, y, w, h, r, g, b, a);
             }
 
-            // Everything else is not yet implemented
+            Opcode::draw_text => {
+                let size = self.pop_s44()?;
+                let y = self.pop_s44()?;
+                let x = self.pop_s44()?;
+                let text = match self.pop()? {
+                    VsfType::x(s) => s,
+                    VsfType::l(s) => s,
+                    other => {
+                        return Err(format!(
+                            "draw_text requires string, got {}",
+                            type_name(&other)
+                        ))
+                    }
+                };
+                let a = self.pop_s44()?;
+                let b = self.pop_s44()?;
+                let g = self.pop_s44()?;
+                let r = self.pop_s44()?;
+                self.canvas.draw_text(x, y, size, &text, r, g, b, a);
+            }
+
+            Opcode::rgba => {
+                // Pop RGBA components and push as 4 separate s44 values
+                // Keeps VSF RGB color space, no conversion until WASM boundary
+                let alpha = self.pop_s44()?;
+                let blue = self.pop_s44()?;
+                let green = self.pop_s44()?;
+                let red = self.pop_s44()?;
+
+                self.stack.push(VsfType::s44(red));
+                self.stack.push(VsfType::s44(green));
+                self.stack.push(VsfType::s44(blue));
+                self.stack.push(VsfType::s44(alpha));
+            }
+
+            Opcode::rgb => {
+                // Pop RGB components, default alpha=1, push as 4 separate s44 values
+                let blue = self.pop_s44()?;
+                let green = self.pop_s44()?;
+                let red = self.pop_s44()?;
+
+                self.stack.push(VsfType::s44(red));
+                self.stack.push(VsfType::s44(green));
+                self.stack.push(VsfType::s44(blue));
+                self.stack.push(VsfType::s44(ScalarF4E4::ONE));
+            }
+
+            // Logical operators (&&, ||, !) - return 1 or 0 based on truthiness
+            Opcode::and => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let result = if self.is_truthy(&a) && self.is_truthy(&b) {
+                    VsfType::s44(ScalarF4E4::ONE)
+                } else {
+                    VsfType::s44(ScalarF4E4::ZERO)
+                };
+                self.stack.push(result);
+            }
+
+            Opcode::or => {
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let result = if self.is_truthy(&a) || self.is_truthy(&b) {
+                    VsfType::s44(ScalarF4E4::ONE)
+                } else {
+                    VsfType::s44(ScalarF4E4::ZERO)
+                };
+                self.stack.push(result);
+            }
+
+            Opcode::not => {
+                let a = self.pop()?;
+                let result = if self.is_truthy(&a) {
+                    VsfType::s44(ScalarF4E4::ZERO)
+                } else {
+                    VsfType::s44(ScalarF4E4::ONE)
+                };
+                self.stack.push(result);
+            }
+
+            // Bitwise operators (&, |, ^, ~) - operate on bits via Spirix
+            Opcode::bit_and => {
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_bitwise_and(lhs, rhs)?;
+                self.stack.push(result);
+            }
+
+            Opcode::bit_or => {
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_bitwise_or(lhs, rhs)?;
+                self.stack.push(result);
+            }
+
+            Opcode::bit_xor => {
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_bitwise_xor(lhs, rhs)?;
+                self.stack.push(result);
+            }
+
+            Opcode::bit_not => {
+                let a = self.pop()?;
+                let result = self.execute_bitwise_not(a)?;
+                self.stack.push(result);
+            }
+
             _ => {
-                return Err(format!("Opcode not yet implemented: {:?}", opcode));
+                return Err(format!(
+                    "[IP:{}] Opcode not yet implemented: {:?}",
+                    self.ip, opcode
+                ));
             }
         }
 
         Ok(())
     }
 
-    /// Pop a value and convert to S44
+    // Type-safe arithmetic dispatch - uses fully qualified VsfType:: to avoid naming conflicts
+
+    fn execute_add(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        spirix_binop!(lhs, rhs, +, "add")
+    }
+
+    fn execute_sub(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        spirix_binop!(lhs, rhs, -, "sub")
+    }
+
+    fn execute_mul(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        spirix_binop!(lhs, rhs, *, "mul")
+    }
+
+    fn execute_div(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        // Use macro for Spirix types (handles division by undefined)
+        spirix_binop!(lhs, rhs, /, "div")
+    }
+
+    fn execute_neg(&self, val: VsfType) -> Result<VsfType, String> {
+        match val {
+            VsfType::s33(v) => Ok(VsfType::s33(-v)),
+            VsfType::s34(v) => Ok(VsfType::s34(-v)),
+            VsfType::s35(v) => Ok(VsfType::s35(-v)),
+            VsfType::s36(v) => Ok(VsfType::s36(-v)),
+            VsfType::s37(v) => Ok(VsfType::s37(-v)),
+            VsfType::s43(v) => Ok(VsfType::s43(-v)),
+            VsfType::s44(v) => Ok(VsfType::s44(-v)),
+            VsfType::s45(v) => Ok(VsfType::s45(-v)),
+            VsfType::s46(v) => Ok(VsfType::s46(-v)),
+            VsfType::s47(v) => Ok(VsfType::s47(-v)),
+            VsfType::s53(v) => Ok(VsfType::s53(-v)),
+            VsfType::s54(v) => Ok(VsfType::s54(-v)),
+            VsfType::s55(v) => Ok(VsfType::s55(-v)),
+            VsfType::s56(v) => Ok(VsfType::s56(-v)),
+            VsfType::s57(v) => Ok(VsfType::s57(-v)),
+            VsfType::s63(v) => Ok(VsfType::s63(-v)),
+            VsfType::s64(v) => Ok(VsfType::s64(-v)),
+            VsfType::s65(v) => Ok(VsfType::s65(-v)),
+            VsfType::s66(v) => Ok(VsfType::s66(-v)),
+            VsfType::s67(v) => Ok(VsfType::s67(-v)),
+            VsfType::s73(v) => Ok(VsfType::s73(-v)),
+            VsfType::s74(v) => Ok(VsfType::s74(-v)),
+            VsfType::s75(v) => Ok(VsfType::s75(-v)),
+            VsfType::s76(v) => Ok(VsfType::s76(-v)),
+            VsfType::s77(v) => Ok(VsfType::s77(-v)),
+            VsfType::i3(v) => Ok(VsfType::i3(v.wrapping_neg())),
+            VsfType::i4(v) => Ok(VsfType::i4(v.wrapping_neg())),
+            VsfType::i5(v) => Ok(VsfType::i5(v.wrapping_neg())),
+            VsfType::i6(v) => Ok(VsfType::i6(v.wrapping_neg())),
+            VsfType::i7(v) => Ok(VsfType::i7(v.wrapping_neg())),
+            other => Err(format!("Cannot negate type: {}", type_name(&other))),
+        }
+    }
+
+    fn execute_eq(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        let result = match (lhs, rhs) {
+            (VsfType::s33(a), VsfType::s33(b)) => a == b,
+            (VsfType::s34(a), VsfType::s34(b)) => a == b,
+            (VsfType::s35(a), VsfType::s35(b)) => a == b,
+            (VsfType::s36(a), VsfType::s36(b)) => a == b,
+            (VsfType::s37(a), VsfType::s37(b)) => a == b,
+            (VsfType::s43(a), VsfType::s43(b)) => a == b,
+            (VsfType::s44(a), VsfType::s44(b)) => a == b,
+            (VsfType::s45(a), VsfType::s45(b)) => a == b,
+            (VsfType::s46(a), VsfType::s46(b)) => a == b,
+            (VsfType::s47(a), VsfType::s47(b)) => a == b,
+            (VsfType::s53(a), VsfType::s53(b)) => a == b,
+            (VsfType::s54(a), VsfType::s54(b)) => a == b,
+            (VsfType::s55(a), VsfType::s55(b)) => a == b,
+            (VsfType::s56(a), VsfType::s56(b)) => a == b,
+            (VsfType::s57(a), VsfType::s57(b)) => a == b,
+            (VsfType::s63(a), VsfType::s63(b)) => a == b,
+            (VsfType::s64(a), VsfType::s64(b)) => a == b,
+            (VsfType::s65(a), VsfType::s65(b)) => a == b,
+            (VsfType::s66(a), VsfType::s66(b)) => a == b,
+            (VsfType::s67(a), VsfType::s67(b)) => a == b,
+            (VsfType::s73(a), VsfType::s73(b)) => a == b,
+            (VsfType::s74(a), VsfType::s74(b)) => a == b,
+            (VsfType::s75(a), VsfType::s75(b)) => a == b,
+            (VsfType::s76(a), VsfType::s76(b)) => a == b,
+            (VsfType::s77(a), VsfType::s77(b)) => a == b,
+            (VsfType::u3(a), VsfType::u3(b)) => a == b,
+            (VsfType::u4(a), VsfType::u4(b)) => a == b,
+            (VsfType::u5(a), VsfType::u5(b)) => a == b,
+            (VsfType::u6(a), VsfType::u6(b)) => a == b,
+            (VsfType::u7(a), VsfType::u7(b)) => a == b,
+            (VsfType::i3(a), VsfType::i3(b)) => a == b,
+            (VsfType::i4(a), VsfType::i4(b)) => a == b,
+            (VsfType::i5(a), VsfType::i5(b)) => a == b,
+            (VsfType::i6(a), VsfType::i6(b)) => a == b,
+            (VsfType::i7(a), VsfType::i7(b)) => a == b,
+            (VsfType::x(a), VsfType::x(b)) => a == b,
+            (VsfType::l(a), VsfType::l(b)) => a == b,
+            (VsfType::d(a), VsfType::d(b)) => a == b,
+            (VsfType::u0(a), VsfType::u0(b)) => a == b,
+            _ => false,
+        };
+        Ok(VsfType::s44(if result {
+            ScalarF4E4::ONE
+        } else {
+            ScalarF4E4::ZERO
+        }))
+    }
+
+    fn execute_lt(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        let result = match (lhs, rhs) {
+            (VsfType::s33(a), VsfType::s33(b)) => a < b,
+            (VsfType::s34(a), VsfType::s34(b)) => a < b,
+            (VsfType::s35(a), VsfType::s35(b)) => a < b,
+            (VsfType::s36(a), VsfType::s36(b)) => a < b,
+            (VsfType::s37(a), VsfType::s37(b)) => a < b,
+            (VsfType::s43(a), VsfType::s43(b)) => a < b,
+            (VsfType::s44(a), VsfType::s44(b)) => a < b,
+            (VsfType::s45(a), VsfType::s45(b)) => a < b,
+            (VsfType::s46(a), VsfType::s46(b)) => a < b,
+            (VsfType::s47(a), VsfType::s47(b)) => a < b,
+            (VsfType::s53(a), VsfType::s53(b)) => a < b,
+            (VsfType::s54(a), VsfType::s54(b)) => a < b,
+            (VsfType::s55(a), VsfType::s55(b)) => a < b,
+            (VsfType::s56(a), VsfType::s56(b)) => a < b,
+            (VsfType::s57(a), VsfType::s57(b)) => a < b,
+            (VsfType::s63(a), VsfType::s63(b)) => a < b,
+            (VsfType::s64(a), VsfType::s64(b)) => a < b,
+            (VsfType::s65(a), VsfType::s65(b)) => a < b,
+            (VsfType::s66(a), VsfType::s66(b)) => a < b,
+            (VsfType::s67(a), VsfType::s67(b)) => a < b,
+            (VsfType::s73(a), VsfType::s73(b)) => a < b,
+            (VsfType::s74(a), VsfType::s74(b)) => a < b,
+            (VsfType::s75(a), VsfType::s75(b)) => a < b,
+            (VsfType::s76(a), VsfType::s76(b)) => a < b,
+            (VsfType::s77(a), VsfType::s77(b)) => a < b,
+            (VsfType::u3(a), VsfType::u3(b)) => a < b,
+            (VsfType::u4(a), VsfType::u4(b)) => a < b,
+            (VsfType::u5(a), VsfType::u5(b)) => a < b,
+            (VsfType::u6(a), VsfType::u6(b)) => a < b,
+            (VsfType::u7(a), VsfType::u7(b)) => a < b,
+            (VsfType::i3(a), VsfType::i3(b)) => a < b,
+            (VsfType::i4(a), VsfType::i4(b)) => a < b,
+            (VsfType::i5(a), VsfType::i5(b)) => a < b,
+            (VsfType::i6(a), VsfType::i6(b)) => a < b,
+            (VsfType::i7(a), VsfType::i7(b)) => a < b,
+            (a, b) => {
+                return Err(format!(
+                    "Type mismatch in lt: {} < {}",
+                    type_name(&a),
+                    type_name(&b)
+                ))
+            }
+        };
+        // Return 1 for true, 0 for false (comparison results are booleans)
+        Ok(VsfType::s44(if result {
+            ScalarF4E4::ONE
+        } else {
+            ScalarF4E4::ZERO
+        }))
+    }
+
+    fn execute_bitwise_and(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        match (lhs, rhs) {
+            (VsfType::s44(a), VsfType::s44(b)) => Ok(VsfType::s44(a & b)),
+            (a, b) => Err(format!(
+                "Type mismatch in bitwise AND: {} & {}",
+                type_name(&a),
+                type_name(&b)
+            )),
+        }
+    }
+
+    fn execute_bitwise_or(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        match (lhs, rhs) {
+            (VsfType::s44(a), VsfType::s44(b)) => Ok(VsfType::s44(a | b)),
+            (a, b) => Err(format!(
+                "Type mismatch in bitwise OR: {} | {}",
+                type_name(&a),
+                type_name(&b)
+            )),
+        }
+    }
+
+    fn execute_bitwise_xor(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        match (lhs, rhs) {
+            (VsfType::s44(a), VsfType::s44(b)) => Ok(VsfType::s44(a ^ b)),
+            (a, b) => Err(format!(
+                "Type mismatch in bitwise XOR: {} ^ {}",
+                type_name(&a),
+                type_name(&b)
+            )),
+        }
+    }
+
+    fn execute_bitwise_not(&self, val: VsfType) -> Result<VsfType, String> {
+        match val {
+            VsfType::s44(a) => Ok(VsfType::s44(!a)),
+            other => Err(format!("Cannot bitwise NOT type: {}", type_name(&other))),
+        }
+    }
+
+    /// Check if a value is "truthy" for logical operations
+    /// Numbers: non-zero = true, zero = false
+    fn is_truthy(&self, val: &VsfType) -> bool {
+        match val {
+            VsfType::s44(v) => !v.is_zero(),
+            VsfType::u3(v) => *v != 0,
+            VsfType::u4(v) => *v != 0,
+            VsfType::u5(v) => *v != 0,
+            VsfType::u6(v) => *v != 0,
+            VsfType::u7(v) => *v != 0,
+            VsfType::i3(v) => *v != 0,
+            VsfType::i4(v) => *v != 0,
+            VsfType::i5(v) => *v != 0,
+            VsfType::i6(v) => *v != 0,
+            VsfType::i7(v) => *v != 0,
+            _ => true, // Other types (strings, arrays, etc) default to true
+        }
+    }
+
     fn pop_s44(&mut self) -> Result<ScalarF4E4, String> {
-        let val = self.stack.pop()
-            .ok_or_else(|| "Stack underflow".to_string())?;
-        val.to_s44()
+        match self.pop()? {
+            VsfType::s44(s) => Ok(s),
+            other => Err(format!("Expected s44, got {}", type_name(&other))),
+        }
+    }
+
+    /// Convert VsfType to F4E4 RGBA components
+    /// Handles u5 packed colours, VSF colour constants, and other integer types
+    fn vsf_to_rgba(
+        &self,
+        v: VsfType,
+    ) -> Result<(ScalarF4E4, ScalarF4E4, ScalarF4E4, ScalarF4E4), String> {
+        let u32_val = match v {
+            VsfType::u5(val) => val,
+            VsfType::u3(val) => val as u32,
+            VsfType::u4(val) => val as u32,
+            VsfType::rk => 0xFF000000, // Black
+            VsfType::rw => 0xFFFFFFFF, // White
+            VsfType::rr => 0xFFFF0000, // Red
+            VsfType::rn => 0xFF00FF00, // Green (lime)
+            VsfType::rb => 0xFF0000FF, // Blue
+            VsfType::rc => 0xFF00FFFF, // Cyan
+            VsfType::rj => 0xFFFF00FF, // Magenta
+            VsfType::ry => 0xFFFFFF00, // Yellow
+            VsfType::rg => 0xFF808080, // Gray
+            VsfType::ro => 0xFFFF8000, // Orange
+            VsfType::rv => 0xFF8000FF, // Violet
+            VsfType::rl => 0xFF00FF00, // Lime (duplicate of green?)
+            VsfType::rq => 0xFF00FFFF, // Aqua (duplicate of cyan?)
+            other => {
+                return Err(format!(
+                    "Cannot convert {} to RGBA colour",
+                    type_name(&other)
+                ))
+            }
+        };
+
+        // Unpack AARRGGBB to F4E4 RGBA components (0.0-1.0) using Spirix
+        let a = ScalarF4E4::from((u32_val >> 24) as u8) >> 8;
+        let r = ScalarF4E4::from((u32_val >> 16) as u8) >> 8;
+        let g = ScalarF4E4::from((u32_val >> 8) as u8) >> 8;
+        let b = ScalarF4E4::from(u32_val as u8) >> 8;
+
+        Ok((r, g, b, a))
     }
 
     /// Peek at top of stack without popping
-    pub fn peek(&self) -> Option<&Value> {
+    pub fn peek(&self) -> Option<&VsfType> {
         self.stack.last()
     }
-
     /// Get stack depth
     pub fn stack_depth(&self) -> usize {
         self.stack.len()
     }
-
     /// Check if halted
     pub fn is_halted(&self) -> bool {
         self.halted
     }
-
     /// Get reference to canvas
     pub fn canvas(&self) -> &Canvas {
         &self.canvas
+    }
+    /// Get mutable reference to canvas (for zoom control)
+    pub fn canvas_mut(&mut self) -> &mut Canvas {
+        &mut self.canvas
+    }
+
+    /// Get stack slice (for testing)
+    #[cfg(test)]
+    pub fn stack(&self) -> &[VsfType] {
+        &self.stack
+    }
+}
+
+fn type_name(v: &VsfType) -> &'static str {
+    match v {
+        VsfType::s33(_) => "s33",
+        VsfType::s34(_) => "s34",
+        VsfType::s35(_) => "s35",
+        VsfType::s36(_) => "s36",
+        VsfType::s37(_) => "s37",
+        VsfType::s43(_) => "s43",
+        VsfType::s44(_) => "s44",
+        VsfType::s45(_) => "s45",
+        VsfType::s46(_) => "s46",
+        VsfType::s47(_) => "s47",
+        VsfType::s53(_) => "s53",
+        VsfType::s54(_) => "s54",
+        VsfType::s55(_) => "s55",
+        VsfType::s56(_) => "s56",
+        VsfType::s57(_) => "s57",
+        VsfType::s63(_) => "s63",
+        VsfType::s64(_) => "s64",
+        VsfType::s65(_) => "s65",
+        VsfType::s66(_) => "s66",
+        VsfType::s67(_) => "s67",
+        VsfType::s73(_) => "s73",
+        VsfType::s74(_) => "s74",
+        VsfType::s75(_) => "s75",
+        VsfType::s76(_) => "s76",
+        VsfType::s77(_) => "s77",
+        VsfType::c33(_) => "c33",
+        VsfType::c34(_) => "c34",
+        VsfType::c35(_) => "c35",
+        VsfType::c36(_) => "c36",
+        VsfType::c37(_) => "c37",
+        VsfType::c43(_) => "c43",
+        VsfType::c44(_) => "c44",
+        VsfType::c45(_) => "c45",
+        VsfType::c46(_) => "c46",
+        VsfType::c47(_) => "c47",
+        VsfType::c53(_) => "c53",
+        VsfType::c54(_) => "c54",
+        VsfType::c55(_) => "c55",
+        VsfType::c56(_) => "c56",
+        VsfType::c57(_) => "c57",
+        VsfType::c63(_) => "c63",
+        VsfType::c64(_) => "c64",
+        VsfType::c65(_) => "c65",
+        VsfType::c66(_) => "c66",
+        VsfType::c67(_) => "c67",
+        VsfType::c73(_) => "c73",
+        VsfType::c74(_) => "c74",
+        VsfType::c75(_) => "c75",
+        VsfType::c76(_) => "c76",
+        VsfType::c77(_) => "c77",
+        VsfType::u0(_) => "u0",
+        VsfType::u3(_) => "u3",
+        VsfType::u4(_) => "u4",
+        VsfType::u5(_) => "u5",
+        VsfType::u6(_) => "u6",
+        VsfType::u7(_) => "u7",
+        VsfType::i3(_) => "i3",
+        VsfType::i4(_) => "i4",
+        VsfType::i5(_) => "i5",
+        VsfType::i6(_) => "i6",
+        VsfType::i7(_) => "i7",
+        VsfType::u(_, _) => "u",
+        VsfType::i(_) => "i",
+        VsfType::f5(_) => "f5",
+        VsfType::f6(_) => "f6",
+        VsfType::j5(_) => "j5",
+        VsfType::j6(_) => "j6",
+        VsfType::x(_) => "x",
+        VsfType::l(_) => "l",
+        VsfType::d(_) => "d",
+        VsfType::rk
+        | VsfType::rw
+        | VsfType::rr
+        | VsfType::rn
+        | VsfType::rb
+        | VsfType::rc
+        | VsfType::rj
+        | VsfType::ry
+        | VsfType::rg
+        | VsfType::ro
+        | VsfType::rv
+        | VsfType::rl
+        | VsfType::rq => "colour",
+        // Catch-all for unhandled VSF types (useful for debugging)
+        _ => "other",
     }
 }
 
@@ -270,71 +987,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_push_constants() {
-        let bytecode = vec![
-            0x70, 0x7a, // push_zero
-            0x70, 0x6f, // push_one
-        ];
-
-        let mut vm = VM::new(bytecode);
-        vm.step().unwrap(); // push_zero
-        assert_eq!(vm.stack_depth(), 1);
-
-        vm.step().unwrap(); // push_one
-        assert_eq!(vm.stack_depth(), 2);
-
-        // Check values
-        let one = vm.stack[1].to_s44().unwrap();
-        let zero = vm.stack[0].to_s44().unwrap();
-        assert_eq!(Into::<f64>::into(one), 1.0);
-        assert_eq!(Into::<f64>::into(zero), 0.0);
-    }
-
-    #[test]
     fn test_arithmetic() {
-        // Test: 2 + 3 = 5
-        // We'll push 1, dup to get 2, push 1 three times and add to get 3, then add
-        let bytecode = vec![
-            0x70, 0x6f, // push_one
-            0x64, 0x70, // dup
-            0x61, 0x64, // add  (1+1=2)
-            0x70, 0x6f, // push_one
-            0x70, 0x6f, // push_one
-            0x61, 0x64, // add  (1+1=2)
-            0x70, 0x6f, // push_one
-            0x61, 0x64, // add  (2+1=3)
-            0x61, 0x64, // add  (2+3=5)
-            0x68, 0x6c, // halt (hl)
-        ];
+        // Test 1 + 1 + 1 + 1 + 1 = 5 using builder API
+        use crate::builder::Program;
+
+        let bytecode = Program::new()
+            .ps_s44(1)
+            .dp()
+            .ad() // 2
+            .ps_s44(1)
+            .ps_s44(1)
+            .ad() // 2, 2
+            .ps_s44(1)
+            .ad() // 2, 3
+            .ad() // 5
+            .hl()
+            .build();
 
         let mut vm = VM::new(bytecode);
         vm.run().unwrap();
-
         assert_eq!(vm.stack_depth(), 1);
-        let result = vm.peek().unwrap().to_s44().unwrap();
-        assert_eq!(Into::<f64>::into(result), 5.0);
+        match vm.peek().unwrap() {
+            VsfType::s44(s) => assert_eq!(*s, ScalarF4E4::from(5)),
+            _ => panic!("Expected s44"),
+        }
     }
 
     #[test]
     fn test_comparison() {
-        // Test: 2 < 3 (should be 1.0 = true)
-        let bytecode = vec![
-            0x70, 0x6f, // push_one
-            0x70, 0x6f, // push_one
-            0x61, 0x64, // add (1+1=2)
-            0x70, 0x6f, // push_one
-            0x70, 0x6f, // push_one
-            0x70, 0x6f, // push_one
-            0x61, 0x64, // add (1+1=2)
-            0x61, 0x64, // add (2+1=3)
-            0x6c, 0x6f, // lo (less-than: 2 < 3)
-            0x68, 0x6c, // halt (hl)
-        ];
+        // Test 2 < 3 = true
+        use crate::builder::Program;
+
+        let bytecode = Program::new().ps_s44(2).ps_s44(3).lo().hl().build();
 
         let mut vm = VM::new(bytecode);
         vm.run().unwrap();
-
-        let result = vm.peek().unwrap().to_s44().unwrap();
-        assert_eq!(Into::<f64>::into(result), 1.0); // true
+        match vm.peek().unwrap() {
+            VsfType::s44(s) => assert_eq!(*s, ScalarF4E4::ONE),
+            _ => panic!("Expected s44"),
+        }
     }
 }
