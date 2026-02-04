@@ -33,7 +33,7 @@ pub struct Canvas {
     half_dims: CircleF4E4,
 
     /// Pixel buffer: s44 RGBA as [R, G, B, A], row-major
-    /// VSF RGB color space - conversion to sRGB happens in WASM wrapper
+    /// VSF RGB colour space - conversion to sRGB happens in WASM wrapper
     pixels: Vec<[ScalarF4E4; 4]>,
 }
 
@@ -49,14 +49,19 @@ impl Canvas {
         };
 
         // Opaque black in s44 RGBA: [0, 0, 0, 1]
-        let black = [ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ONE];
+        let black = [
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ONE,
+        ];
 
         Self {
             width,
             height,
             span: ScalarF4E4::from(span_px),
             ru: ScalarF4E4::ONE,
-            half_dims: CircleF4E4::from((ScalarF4E4::from(width), ScalarF4E4::from(height))) >> 1,
+            half_dims: CircleF4E4::from((width, height)) >> 1,
             pixels: vec![black; width * height],
         }
     }
@@ -132,7 +137,7 @@ impl Canvas {
         ph.to_isize()
     }
 
-    /// Clear entire canvas to a colour (s44 RGBA in VSF RGB color space)
+    /// Clear entire canvas to a colour (s44 RGBA in VSF RGB colour space)
     pub fn clear(&mut self, r: ScalarF4E4, g: ScalarF4E4, b: ScalarF4E4, a: ScalarF4E4) {
         self.pixels.fill([r, g, b, a]);
     }
@@ -140,22 +145,23 @@ impl Canvas {
     /// Fill a rectangle (RU coordinates, center-origin)
     ///
     /// Coordinates use Relative Units with (0,0) at center:
-    /// - x, y: center of rectangle in RU
-    /// - w, h: width and height in RU
+    /// - pos: center of rectangle (x, y) in RU as CircleF4E4
+    /// - size: dimensions (w, h) in RU as CircleF4E4
+    /// - colour: RGBA as [ScalarF4E4; 4]
     /// - 1.0 RU = span * ru pixels
     pub fn fill_rect(
         &mut self,
-        x: ScalarF4E4,
-        y: ScalarF4E4,
-        w: ScalarF4E4,
-        h: ScalarF4E4,
-        r: ScalarF4E4,
-        g: ScalarF4E4,
-        b: ScalarF4E4,
-        a: ScalarF4E4,
+        pos: CircleF4E4,
+        size: CircleF4E4,
+        colour: [ScalarF4E4; 4],
     ) {
-        let color = [r, g, b, a];
-        // x,y,w,h are in RU coordinate space - convert to pixel coords
+        // Extract x,y from pos and w,h from size
+        let x = pos.r();  // real component = x
+        let y = pos.i();  // imaginary component = y
+        let w = size.r();
+        let h = size.i();
+
+        // Convert RU coordinates to pixel coords
         let cx = self.ru_to_px_x(x);
         let cy = self.ru_to_px_y(y);
         let pw = self.ru_to_px_w(w);
@@ -175,25 +181,28 @@ impl Canvas {
         for row in y1..y2 {
             for col in x1..x2 {
                 let idx = (row as usize) * self.width + (col as usize);
-                self.pixels[idx] = color;
+                self.pixels[idx] = colour;
             }
         }
     }
 
     /// Fill a rectangle (viewport coordinates 0.0-1.0)
-    /// Origin at top-left, x/y specify top-left corner of rectangle.
+    /// Origin at top-left, pos specifies top-left corner of rectangle.
+    /// - pos: top-left corner (x, y) in viewport coords as CircleF4E4
+    /// - size: dimensions (w, h) in viewport coords as CircleF4E4
+    /// - colour: RGBA as [ScalarF4E4; 4]
     pub fn fill_rect_vp(
         &mut self,
-        x: ScalarF4E4,
-        y: ScalarF4E4,
-        w: ScalarF4E4,
-        h: ScalarF4E4,
-        r: ScalarF4E4,
-        g: ScalarF4E4,
-        b: ScalarF4E4,
-        a: ScalarF4E4,
+        pos: CircleF4E4,
+        size: CircleF4E4,
+        colour: [ScalarF4E4; 4],
     ) {
-        let color = [r, g, b, a];
+        // Extract x,y from pos and w,h from size
+        let x = pos.r();
+        let y = pos.i();
+        let w = size.r();
+        let h = size.i();
+
         // Convert viewport coords to pixel coords (Spirix math)
         let width_s = ScalarF4E4::from(self.width);
         let height_s = ScalarF4E4::from(self.height);
@@ -213,22 +222,22 @@ impl Canvas {
         for row in y1..y2 {
             for col in x1..x2 {
                 let idx = (row as usize) * self.width + (col as usize);
-                self.pixels[idx] = color;
+                self.pixels[idx] = colour;
             }
         }
     }
 
     /// Draw a single pixel (viewport coordinates)
+    /// - pos: pixel position (x, y) in viewport coords as CircleF4E4
+    /// - colour: RGBA as [ScalarF4E4; 4]
     pub fn draw_pixel(
         &mut self,
-        x: ScalarF4E4,
-        y: ScalarF4E4,
-        r: ScalarF4E4,
-        g: ScalarF4E4,
-        b: ScalarF4E4,
-        a: ScalarF4E4,
+        pos: CircleF4E4,
+        colour: [ScalarF4E4; 4],
     ) {
-        let color = [r, g, b, a];
+        let x = pos.r();
+        let y = pos.i();
+
         let width_s = ScalarF4E4::from(self.width);
         let height_s = ScalarF4E4::from(self.height);
 
@@ -238,28 +247,120 @@ impl Canvas {
         // Unsigned bounds check: negative values wrap to huge positive, fail automatically
         if (px as u32) < self.width as u32 && (py as u32) < self.height as u32 {
             let idx = (py as usize) * self.width + (px as usize);
-            self.pixels[idx] = color;
+            self.pixels[idx] = colour;
         }
     }
 
     /// Draw text (placeholder - draws coloured rectangle for text bounds)
+    /// - pos: text position (x, y) as CircleF4E4
+    /// - size: text size as ScalarF4E4
+    /// - text: string to render
+    /// - colour: RGBA as [ScalarF4E4; 4]
     pub fn draw_text(
         &mut self,
-        x: ScalarF4E4,
-        y: ScalarF4E4,
+        pos: CircleF4E4,
         size: ScalarF4E4,
         text: &str,
-        r: ScalarF4E4,
-        g: ScalarF4E4,
-        b: ScalarF4E4,
-        a: ScalarF4E4,
+        colour: [ScalarF4E4; 4],
     ) {
         // Placeholder: Draw a coloured rectangle representing text bounds
         // Height is based on size, width is proportional to text length
         let char_width = size * ScalarF4E4::from(6) / ScalarF4E4::from(10);
         let text_width = char_width * ScalarF4E4::from(text.len());
 
-        self.fill_rect(x, y, text_width, size, r, g, b, a);
+        let text_size = CircleF4E4::from((text_width, size));
+        self.fill_rect(pos, text_size, colour);
+    }
+
+    /// Fill a circle (RU coordinates, center-origin)
+    /// - center: center point (x, y) in RU as CircleF4E4
+    /// - radius: radius in RU as ScalarF4E4
+    /// - colour: RGBA as [ScalarF4E4; 4]
+    pub fn fill_circle(
+        &mut self,
+        center: CircleF4E4,
+        radius: ScalarF4E4,
+        colour: [ScalarF4E4; 4],
+    ) {
+        let cx = self.ru_to_px_x(center.r());
+        let cy = self.ru_to_px_y(center.i());
+        let r = self.ru_to_px_w(radius);
+
+        // Midpoint circle algorithm with flood fill
+        for py in (cy - r)..=(cy + r) {
+            for px in (cx - r)..=(cx + r) {
+                // Check if pixel is within circle radius
+                let dx = px - cx;
+                let dy = py - cy;
+                if dx * dx + dy * dy <= r * r {
+                    // Bounds check
+                    if (px as u32) < self.width as u32 && (py as u32) < self.height as u32 {
+                        let idx = (py as usize) * self.width + (px as usize);
+                        self.pixels[idx] = colour;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stroke a circle outline (RU coordinates, center-origin)
+    /// - center: center point (x, y) in RU as CircleF4E4
+    /// - radius: radius in RU as ScalarF4E4
+    /// - stroke_width: line width in RU as ScalarF4E4
+    /// - colour: RGBA as [ScalarF4E4; 4]
+    pub fn stroke_circle(
+        &mut self,
+        center: CircleF4E4,
+        radius: ScalarF4E4,
+        stroke_width: ScalarF4E4,
+        colour: [ScalarF4E4; 4],
+    ) {
+        let cx = self.ru_to_px_x(center.r());
+        let cy = self.ru_to_px_y(center.i());
+        let r_outer = self.ru_to_px_w(radius + stroke_width / ScalarF4E4::from(2));
+        let r_inner = self.ru_to_px_w(radius - stroke_width / ScalarF4E4::from(2)).max(0);
+
+        // Draw pixels in the annulus between inner and outer radius
+        for py in (cy - r_outer)..=(cy + r_outer) {
+            for px in (cx - r_outer)..=(cx + r_outer) {
+                let dx = px - cx;
+                let dy = py - cy;
+                let dist_sq = dx * dx + dy * dy;
+
+                if dist_sq >= r_inner * r_inner && dist_sq <= r_outer * r_outer {
+                    // Bounds check
+                    if (px as u32) < self.width as u32 && (py as u32) < self.height as u32 {
+                        let idx = (py as usize) * self.width + (px as usize);
+                        self.pixels[idx] = colour;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Draw an anti-aliased line (pixel coordinates)
+    /// - start: start point (x, y) in pixels
+    /// - end: end point (x, y) in pixels
+    /// - colour_start: RGBA colour at line start
+    /// - colour_end: RGBA colour at line end
+    pub fn draw_line(
+        &mut self,
+        start: CircleF4E4,
+        end: CircleF4E4,
+        colour_start: [ScalarF4E4; 4],
+        colour_end: [ScalarF4E4; 4],
+    ) {
+        crate::drawing::line::draw_line_s44(
+            &mut self.pixels,
+            self.width,
+            self.height,
+            start.r(),
+            start.i(),
+            end.r(),
+            end.i(),
+            colour_start,
+            colour_end,
+        );
     }
 
     /// Get canvas dimensions
@@ -285,19 +386,63 @@ impl Canvas {
     /// Convert canvas pixels to RGBA byte array for browser ImageData
     ///
     /// Converts s44 VSF RGB pixels to sRGB RGBA bytes [RR, GG, BB, AA]
-    /// TODO: Implement VSF RGB → sRGB color space conversion
-    /// Currently just quantizes s44 → u8 without color space conversion
+    ///
+    /// Pipeline:
+    /// 1. Gamma decode VSF RGB (gamma 2 = square)
+    /// 2. Apply VSF RGB → sRGB colour space transform matrix
+    /// 3. Apply sRGB OETF (piecewise gamma encoding)
+    /// 4. Quantize to u8 [0-255]
     pub fn to_rgba_bytes(&self) -> Vec<u8> {
+        use vsf::colour::convert::apply_matrix_3x3;
+        use vsf::colour::VSF_RGB2SRGB;
+
         self.pixels
             .iter()
             .flat_map(|&[r, g, b, a]| {
-                let r8 = (r << 8isize).to_u8();
-                let g8 = (g << 8isize).to_u8();
-                let b8 = (b << 8isize).to_u8();
+                // 1. Gamma decode: VSF RGB uses gamma 2 (square for decode)
+                let r_lin = (r * r).to_f32();
+                let g_lin = (g * g).to_f32();
+                let b_lin = (b * b).to_f32();
+
+                // 2. Color space transform: Linear VSF RGB → Linear sRGB
+                let srgb_lin = apply_matrix_3x3(&VSF_RGB2SRGB, &[r_lin, g_lin, b_lin]);
+
+                // 3. Apply sRGB OETF (gamma encode for display)
+                let r_enc = srgb_oetf(srgb_lin[0]);
+                let g_enc = srgb_oetf(srgb_lin[1]);
+                let b_enc = srgb_oetf(srgb_lin[2]);
+
+                // 4. Quantize to u8
+                let r8 = (r_enc * 256.0) as u8;
+                let g8 = (g_enc * 256.0) as u8;
+                let b8 = (b_enc * 256.0) as u8;
                 let a8 = (a << 8isize).to_u8();
+
                 [r8, g8, b8, a8]
             })
             .collect()
+    }
+}
+
+/// sRGB OETF (Opto-Electronic Transfer Function) in Scalar space
+///
+/// Converts linear sRGB [0, 1] to gamma-encoded sRGB [0, 1]
+///
+/// Piecewise function per IEC 61966-2-1:1999:
+/// - Linear segment: if linear ≤ 0.0031308, encoded = 12.92 × linear
+/// - Gamma segment: if linear > 0.0031308, encoded = 1.055 × linear^(1/2.4) - 0.055
+///
+/// # Arguments
+/// * `linear` - Linear sRGB value in range [0.0, 1.0]
+///
+/// # Returns
+/// Gamma-encoded sRGB value in range [0.0, 1.0]
+fn srgb_oetf(linear: f32) -> f32 {
+    let clamped = linear.clamp(0.0, 1.0);
+    if clamped <= 0.0031308 {
+        clamped * 12.92
+    } else {
+        1.055 * clamped.powf(1.0 / 2.4) - 0.055
     }
 }
 
@@ -323,7 +468,12 @@ mod tests {
             ScalarF4E4::ONE,
         );
 
-        let red_rgba = [ScalarF4E4::ONE, ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ONE];
+        let red_rgba = [
+            ScalarF4E4::ONE,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ONE,
+        ];
         assert!(canvas.pixels().iter().all(|&p| p == red_rgba));
     }
 
@@ -340,30 +490,32 @@ mod tests {
 
         // Fill center with white using RU coordinates
         // (0,0) = center, 0.5 RU wide/tall = 50 pixels (span=100, ru=1.0)
-        let x = ScalarF4E4::from(0); // center
-        let y = ScalarF4E4::from(0); // center
-        let w = ScalarF4E4::from(1) / ScalarF4E4::from(2); // 0.5 = 50 pixels
-        let h = ScalarF4E4::from(1) / ScalarF4E4::from(2); // 0.5 = 50 pixels
+        let pos = CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::ZERO)); // center (x, y)
+        let size = CircleF4E4::from((
+            ScalarF4E4::from(1) / ScalarF4E4::from(2), // w = 0.5 = 50 pixels
+            ScalarF4E4::from(1) / ScalarF4E4::from(2), // h = 0.5 = 50 pixels
+        ));
+        let white = [ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE];
 
-        // Opaque white: R=1, G=1, B=1, A=1
-        canvas.fill_rect(
-            x,
-            y,
-            w,
-            h,
-            ScalarF4E4::ONE,
-            ScalarF4E4::ONE,
-            ScalarF4E4::ONE,
-            ScalarF4E4::ONE,
-        );
+        canvas.fill_rect(pos, size, white);
 
         // Check center pixel is white (R=1, G=1, B=1, A=1)
         let center = 50 * 100 + 50;
-        let white_rgba = [ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE];
+        let white_rgba = [
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+        ];
         assert_eq!(canvas.pixels()[center], white_rgba);
 
         // Check corner pixel is still black (R=0, G=0, B=0, A=1)
-        let black_rgba = [ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ONE];
+        let black_rgba = [
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ONE,
+        ];
         assert_eq!(canvas.pixels()[0], black_rgba);
     }
 
@@ -379,30 +531,87 @@ mod tests {
         );
 
         // Fill center quarter with white using viewport coordinates
-        let x = ScalarF4E4::from(1) / ScalarF4E4::from(4); // 0.25
-        let y = ScalarF4E4::from(1) / ScalarF4E4::from(4); // 0.25
-        let w = ScalarF4E4::from(1) / ScalarF4E4::from(2); // 0.5
-        let h = ScalarF4E4::from(1) / ScalarF4E4::from(2); // 0.5
+        let pos = CircleF4E4::from((
+            ScalarF4E4::from(1) / ScalarF4E4::from(4), // x = 0.25
+            ScalarF4E4::from(1) / ScalarF4E4::from(4), // y = 0.25
+        ));
+        let size = CircleF4E4::from((
+            ScalarF4E4::from(1) / ScalarF4E4::from(2), // w = 0.5
+            ScalarF4E4::from(1) / ScalarF4E4::from(2), // h = 0.5
+        ));
+        let white = [ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE];
 
-        // Opaque white
-        canvas.fill_rect_vp(
-            x,
-            y,
-            w,
-            h,
-            ScalarF4E4::ONE,
-            ScalarF4E4::ONE,
-            ScalarF4E4::ONE,
-            ScalarF4E4::ONE,
-        );
+        canvas.fill_rect_vp(pos, size, white);
 
         // Check center pixel is white (R=1, G=1, B=1, A=1)
         let center = 50 * 100 + 50;
-        let white_rgba = [ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE];
+        let white_rgba = [
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+        ];
         assert_eq!(canvas.pixels()[center], white_rgba);
 
         // Check corner pixel is still black (R=0, G=0, B=0, A=1)
-        let black_rgba = [ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ONE];
+        let black_rgba = [
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ONE,
+        ];
         assert_eq!(canvas.pixels()[0], black_rgba);
+    }
+
+    #[test]
+    fn test_fill_circle() {
+        let mut canvas = Canvas::new(100, 100);
+        // Opaque black
+        canvas.clear(
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ONE,
+        );
+
+        // Fill circle at center with radius = 0.25 RU (25 pixels)
+        let center = CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::ZERO));
+        let radius = ScalarF4E4::from(1) / ScalarF4E4::from(4); // 0.25 = 25 pixels
+        let white = [ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE];
+
+        canvas.fill_circle(center, radius, white);
+
+        // Check center pixel is white
+        let center_px = 50 * 100 + 50;
+        assert_eq!(canvas.pixels()[center_px], white);
+
+        // Check corner pixel is still black
+        let black = [ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ONE];
+        assert_eq!(canvas.pixels()[0], black);
+    }
+
+    #[test]
+    fn test_stroke_circle() {
+        let mut canvas = Canvas::new(100, 100);
+        // Opaque black
+        canvas.clear(
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ONE,
+        );
+
+        // Stroke circle at center
+        let center = CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::ZERO));
+        let radius = ScalarF4E4::from(1) / ScalarF4E4::from(4); // 0.25 = 25 pixels
+        let stroke_width = ScalarF4E4::from(1) / ScalarF4E4::from(20); // 0.05 = 5 pixels
+        let white = [ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE];
+
+        canvas.stroke_circle(center, radius, stroke_width, white);
+
+        // The exact pixel values depend on implementation, just verify no crash
+        // and that some pixels changed
+        let white_count = canvas.pixels().iter().filter(|&&p| p == white).count();
+        assert!(white_count > 0, "Expected some white pixels from circle stroke");
     }
 }

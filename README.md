@@ -25,7 +25,7 @@ Toka is a stack-based virtual machine designed for executing signed, capability-
 - ✅ VSF bytecode parsing and execution
 - ✅ BLAKE3 content-addressed function calls
 - ✅ Canvas rendering with RU coordinates
-- ✅ ARGB color system (Spirix F4E4 RGBA internally)
+- ✅ ARGB colour system (Spirix F4E4 RGBA internally)
 - ✅ WASM portal in Chrome (localhost:8000)
 - ✅ Panic hook and debug logging
 - ✅ 18/19 tests passing
@@ -138,7 +138,7 @@ Toka supports these stack value types:
 | `i3-i7` | Signed integers | 8-256 bit | -2^(2^N-1) to 2^(2^N-1)-1 |
 | `l` | ASCII label/string | Variable | Metadata, names |
 | `x` | Huffman text (Unicode) | Variable | Compressed strings |
-| `Color` | RGBA color | 32-bit | 0xRRGGBBAA |
+| `Color` | RGBA colour | 32-bit | 0xRRGGBBAA |
 | `Bool` | Boolean | 1 bit | true/false |
 | `Handle` | Capability reference | 64-bit | Opaque ID |
 
@@ -221,14 +221,14 @@ Example:
 
 **Drawing (8 ops - viewport relative 0.0-1.0)**
 ```
-{cc}          - Clear canvas (pop: color)
-{fr}          - Fill rect (pop: color, h%, w%, y%, x%)
-{fc}          - Fill circle (pop: color, r%, cy%, cx%)
-{dl}          - Draw line (pop: width%, color, y2%, x2%, y1%, x1%)
+{cc}          - Clear canvas (pop: colour)
+{fr}          - Fill rect (pop: colour, h%, w%, y%, x%)
+{fc}          - Fill circle (pop: colour, r%, cy%, cx%)
+{dl}          - Draw line (pop: width%, colour, y2%, x2%, y1%, x1%)
 {dt}          - Draw text (pop: size%, y%, x%, string)
-{sc}          - Set color (pop: color)
-{sr}          - Stroke rect (pop: width%, color, h%, w%, y%, x%)
-{sl}          - Stroke circle (pop: width%, color, r%, cy%, cx%)
+{sc}          - Set colour (pop: colour)
+{sr}          - Stroke rect (pop: width%, colour, h%, w%, y%, x%)
+{sl}          - Stroke circle (pop: width%, colour, r%, cy%, cx%)
 ```
 
 **Control Flow (4 ops)**
@@ -252,7 +252,7 @@ Example:
 {ps}s44◖0.5◗         # Push x (center)
 {ps}s44◖0.3◗         # Push y (center)
 {ps}s44◖0.2◗         # Push radius
-{ps}u5◖0xFF0000FF◗   # Push red color
+{ps}u5◖0xFF0000FF◗   # Push red colour
 {fc}                 # Fill circle
 {ht}                 # Halt
 ```
@@ -332,7 +332,7 @@ span = 2×1920×1080 / (1920+1080) = 1382 pixels
 {ps}s44{0}     // x = 0
 {ps}s44{0}     // y = 0
 {ps}s44{0.5}   // radius = 0.5 RU
-{ps}u5{0xFF0000FF}  // color = blue ARGB
+{ps}u5{0xFF0000FF}  // colour = blue ARGB
 {fc}           // fill_circle
 ```
 

@@ -23,7 +23,7 @@
 
 use crate::canvas::Canvas;
 use crate::opcode::Opcode;
-use spirix::ScalarF4E4;
+use spirix::{CircleF4E4, ScalarF4E4};
 use std::collections::HashMap;
 // Note: We use VSF RGB directly, NOT sRGB conversion
 // WASM wrapper handles sRGB conversion on Chrome/browser side
@@ -470,21 +470,20 @@ impl VM {
             }
 
             Opcode::fill_rect => {
-                let h = self.pop_s44()?;
-                let w = self.pop_s44()?;
-                let y = self.pop_s44()?;
-                let x = self.pop_s44()?;
-                let a = self.pop_s44()?;
-                let b = self.pop_s44()?;
-                let g = self.pop_s44()?;
-                let r = self.pop_s44()?;
-                self.canvas.fill_rect(x, y, w, h, r, g, b, a);
+                let size = self.pop_c44()?;   // (w, h)
+                let pos = self.pop_c44()?;    // (x, y)
+                let colour = [
+                    self.pop_s44()?,  // r
+                    self.pop_s44()?,  // g
+                    self.pop_s44()?,  // b
+                    self.pop_s44()?,  // a
+                ];
+                self.canvas.fill_rect(pos, size, colour);
             }
 
             Opcode::draw_text => {
                 let size = self.pop_s44()?;
-                let y = self.pop_s44()?;
-                let x = self.pop_s44()?;
+                let pos = self.pop_c44()?;    // (x, y)
                 let text = match self.pop()? {
                     VsfType::x(s) => s,
                     VsfType::l(s) => s,
@@ -495,16 +494,43 @@ impl VM {
                         ))
                     }
                 };
-                let a = self.pop_s44()?;
-                let b = self.pop_s44()?;
-                let g = self.pop_s44()?;
-                let r = self.pop_s44()?;
-                self.canvas.draw_text(x, y, size, &text, r, g, b, a);
+                let colour = [
+                    self.pop_s44()?,  // r
+                    self.pop_s44()?,  // g
+                    self.pop_s44()?,  // b
+                    self.pop_s44()?,  // a
+                ];
+                self.canvas.draw_text(pos, size, &text, colour);
+            }
+
+            Opcode::fill_circle => {
+                let radius = self.pop_s44()?;
+                let center = self.pop_c44()?;  // (x, y)
+                let colour = [
+                    self.pop_s44()?,  // r
+                    self.pop_s44()?,  // g
+                    self.pop_s44()?,  // b
+                    self.pop_s44()?,  // a
+                ];
+                self.canvas.fill_circle(center, radius, colour);
+            }
+
+            Opcode::stroke_circle => {
+                let stroke_width = self.pop_s44()?;
+                let radius = self.pop_s44()?;
+                let center = self.pop_c44()?;  // (x, y)
+                let colour = [
+                    self.pop_s44()?,  // r
+                    self.pop_s44()?,  // g
+                    self.pop_s44()?,  // b
+                    self.pop_s44()?,  // a
+                ];
+                self.canvas.stroke_circle(center, radius, stroke_width, colour);
             }
 
             Opcode::rgba => {
                 // Pop RGBA components and push as 4 separate s44 values
-                // Keeps VSF RGB color space, no conversion until WASM boundary
+                // Keeps VSF RGB colour space, no conversion until WASM boundary
                 let alpha = self.pop_s44()?;
                 let blue = self.pop_s44()?;
                 let green = self.pop_s44()?;
@@ -587,6 +613,107 @@ impl VM {
                 let a = self.pop()?;
                 let result = self.execute_bitwise_not(a)?;
                 self.stack.push(result);
+            }
+
+            // ==================== LOOM LAYOUT ====================
+
+            Opcode::render_loom => {
+                // Pop vt capsule containing Toka Tree layout node
+                let vsf_capsule = match self.stack.pop() {
+                    Some(vsf @ VsfType::v(encoding, _)) => {
+                        if encoding == b't' {
+                            vsf
+                        } else {
+                            return Err(format!(
+                                "render_loom expects vt capsule (Toka Tree), got encoding: {}",
+                                encoding as char
+                            ));
+                        }
+                    }
+                    Some(other) => {
+                        return Err(format!(
+                            "render_loom expects vt capsule, got: {:?}",
+                            type_name(&other)
+                        ))
+                    }
+                    None => return Err("render_loom: stack underflow".to_string()),
+                };
+
+                // Parse vt wrapped Toka Tree node
+                let vsf_node = vsf::decoding::toka_tree::parse_vt_toka_node(&vsf_capsule)
+                    .map_err(|e| format!("Failed to parse vt Toka Tree capsule: {}", e))?;
+
+                // Convert VSF TokaNode to Toka LayoutNode
+                use crate::loom::LayoutNode;
+                let layout_node = LayoutNode::from_vsf_node(&vsf_node);
+
+                // Render to canvas using root viewport bounds
+                let root_bounds = crate::loom::LayoutBounds {
+                    pos: spirix::CircleF4E4::from((
+                        spirix::ScalarF4E4::ZERO,
+                        spirix::ScalarF4E4::ZERO,
+                    )),
+                    size: spirix::CircleF4E4::from((
+                        spirix::ScalarF4E4::ONE,
+                        spirix::ScalarF4E4::ONE,
+                    )),
+                };
+
+                layout_node.render(&mut self.canvas, &root_bounds);
+            }
+
+            Opcode::loom_box => {
+                // TODO: Create box node and push to stack
+                // Needs VSF tTb type variant
+                return Err("loom_box not yet implemented (needs VSF tTb type)".to_string());
+            }
+
+            Opcode::loom_circle => {
+                // TODO: Create circle node and push to stack
+                // Needs VSF tTc type variant
+                return Err("loom_circle not yet implemented (needs VSF tTc type)".to_string());
+            }
+
+            Opcode::loom_text => {
+                // TODO: Create text node and push to stack
+                // Needs VSF tTt type variant
+                return Err("loom_text not yet implemented (needs VSF tTt type)".to_string());
+            }
+
+            Opcode::loom_button => {
+                // TODO: Create button node and push to stack
+                // Needs VSF tTu type variant
+                return Err("loom_button not yet implemented (needs VSF tTu type)".to_string());
+            }
+
+            Opcode::loom_group => {
+                // TODO: Create group node and push to stack
+                // Needs VSF tTg type variant
+                return Err("loom_group not yet implemented (needs VSF tTg type)".to_string());
+            }
+
+            Opcode::loom_line => {
+                // TODO: Create line node and push to stack
+                // Needs VSF tTl type variant
+                return Err("loom_line not yet implemented (needs VSF tTl type)".to_string());
+            }
+
+            Opcode::loom_path => {
+                // TODO: Create path node and push to stack
+                // Needs VSF tTp type variant
+                return Err("loom_path not yet implemented (needs VSF tTp type)".to_string());
+            }
+
+            Opcode::loom_image => {
+                // TODO: Create image node and push to stack
+                // Needs VSF tTi type variant
+                return Err("loom_image not yet implemented (needs VSF tTi type)".to_string());
+            }
+
+            Opcode::loom_surface => {
+                // TODO: Create surface node and push to stack
+                // Needs VSF tTs type variant
+                return Err("loom_surface not yet implemented (needs VSF tTs type)".to_string());
             }
 
             _ => {
@@ -824,8 +951,21 @@ impl VM {
         }
     }
 
+    fn pop_c44(&mut self) -> Result<CircleF4E4, String> {
+        match self.pop()? {
+            VsfType::c44(c) => Ok(c),
+            other => Err(format!("Expected c44, got {}", type_name(&other))),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn push_c44(&mut self, circle: CircleF4E4) {
+        self.stack.push(VsfType::c44(circle));
+    }
+
     /// Convert VsfType to F4E4 RGBA components
     /// Handles u5 packed colours, VSF colour constants, and other integer types
+    #[allow(dead_code)]
     fn vsf_to_rgba(
         &self,
         v: VsfType,
@@ -834,19 +974,19 @@ impl VM {
             VsfType::u5(val) => val,
             VsfType::u3(val) => val as u32,
             VsfType::u4(val) => val as u32,
-            VsfType::rk => 0xFF000000, // Black
-            VsfType::rw => 0xFFFFFFFF, // White
-            VsfType::rr => 0xFFFF0000, // Red
-            VsfType::rn => 0xFF00FF00, // Green (lime)
-            VsfType::rb => 0xFF0000FF, // Blue
-            VsfType::rc => 0xFF00FFFF, // Cyan
-            VsfType::rj => 0xFFFF00FF, // Magenta
-            VsfType::ry => 0xFFFFFF00, // Yellow
-            VsfType::rg => 0xFF808080, // Gray
-            VsfType::ro => 0xFFFF8000, // Orange
-            VsfType::rv => 0xFF8000FF, // Violet
-            VsfType::rl => 0xFF00FF00, // Lime (duplicate of green?)
-            VsfType::rq => 0xFF00FFFF, // Aqua (duplicate of cyan?)
+            VsfType::rck => 0xFF000000, // Black
+            VsfType::rcw => 0xFFFFFFFF, // White
+            VsfType::rcr => 0xFFFF0000, // Red
+            VsfType::rcn => 0xFF00FF00, // Green
+            VsfType::rcb => 0xFF0000FF, // Blue
+            VsfType::rcc => 0xFF00FFFF, // Cyan
+            VsfType::rcj => 0xFFFF00FF, // Magenta
+            VsfType::rcy => 0xFFFFFF00, // Yellow
+            VsfType::rcg => 0xFF808080, // Gray
+            VsfType::rco => 0xFFFF8000, // Orange
+            VsfType::rcv => 0xFF8000FF, // Violet
+            VsfType::rcl => 0xFF00FF00, // Lime (duplicate of green)
+            VsfType::rcq => 0xFF00FFFF, // Aqua (duplicate of cyan)
             other => {
                 return Err(format!(
                     "Cannot convert {} to RGBA colour",
@@ -964,19 +1104,19 @@ fn type_name(v: &VsfType) -> &'static str {
         VsfType::x(_) => "x",
         VsfType::l(_) => "l",
         VsfType::d(_) => "d",
-        VsfType::rk
-        | VsfType::rw
-        | VsfType::rr
-        | VsfType::rn
-        | VsfType::rb
-        | VsfType::rc
-        | VsfType::rj
-        | VsfType::ry
-        | VsfType::rg
-        | VsfType::ro
-        | VsfType::rv
-        | VsfType::rl
-        | VsfType::rq => "colour",
+        VsfType::rck
+        | VsfType::rcw
+        | VsfType::rcr
+        | VsfType::rcn
+        | VsfType::rcb
+        | VsfType::rcc
+        | VsfType::rcj
+        | VsfType::rcy
+        | VsfType::rcg
+        | VsfType::rco
+        | VsfType::rcv
+        | VsfType::rcl
+        | VsfType::rcq => "colour",
         // Catch-all for unhandled VSF types (useful for debugging)
         _ => "other",
     }

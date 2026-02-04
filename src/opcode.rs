@@ -318,6 +318,56 @@ pub enum Opcode {
     /// VSF: {sf}
     set_font,
 
+    // ==================== LOOM LAYOUT ====================
+    /// Pop layout_node; render to canvas
+    /// VSF: {rl}
+    render_loom,
+
+    /// Pop child_count, ...children, colour[4], size, pos; push box node
+    /// Stack: [..., pos:c44, size:c44, r,g,b,a:s44, child_count:u, ...children] -> [..., node]
+    /// VSF: {lb}
+    loom_box,
+
+    /// Pop colour[4], radius, center; push circle node
+    /// Stack: [..., center:c44, radius:s44, r,g,b,a:s44] -> [..., node]
+    /// VSF: {lk}
+    loom_circle,
+
+    /// Pop colour[4], content, size, pos; push text node
+    /// Stack: [..., pos:c44, size:s44, content:str, r,g,b,a:s44] -> [..., node]
+    /// VSF: {lx}
+    loom_text,
+
+    /// Pop colour[4], variant, label, size, pos; push button node
+    /// Stack: [..., pos:c44, size:c44, label:str, variant:u8, r,g,b,a:s44] -> [..., node]
+    /// VSF: {lu}
+    loom_button,
+
+    /// Pop child_count, ...children, size, pos; push group node
+    /// Stack: [..., pos:c44, size:c44, child_count:u, ...children] -> [..., node]
+    /// VSF: {lw}
+    loom_group,
+
+    /// Pop colour[4], width, end, start; push line node
+    /// Stack: [..., start:c44, end:c44, width:s44, r,g,b,a:s44] -> [..., node]
+    /// VSF: {lj}
+    loom_line,
+
+    /// Pop colour[4], stroke_width, cmd_count, ...commands; push path node
+    /// Stack: [..., cmd_count:u, ...commands, stroke_width:s44, r,g,b,a:s44] -> [..., node]
+    /// VSF: {ly}
+    loom_path,
+
+    /// Pop tint[4], handle, size, pos; push image node
+    /// Stack: [..., pos:c44, size:c44, handle:u64, r,g,b,a:s44] -> [..., node]
+    /// VSF: {lm}
+    loom_image,
+
+    /// Pop handle, size, pos; push surface node
+    /// Stack: [..., pos:c44, size:c44, handle:u64] -> [..., node]
+    /// VSF: {ln}
+    loom_surface,
+
     // ==================== COLOUR UTILITIES ====================
     /// Pop a, b, g, r (S44 0.0-1.0); push u32 RGBA
     /// VSF: {ca}
@@ -506,6 +556,18 @@ impl Opcode {
             0x6474 => Some(Self::draw_text),     // dt
             0x7366 => Some(Self::set_font),      // sf
 
+            // Loom layout
+            0x726c => Some(Self::render_loom),   // rl
+            0x6c62 => Some(Self::loom_box),      // lb
+            0x6c6b => Some(Self::loom_circle),   // lk
+            0x6c78 => Some(Self::loom_text),     // lx
+            0x6c75 => Some(Self::loom_button),   // lu
+            0x6c77 => Some(Self::loom_group),    // lw
+            0x6c6a => Some(Self::loom_line),     // lj
+            0x6c79 => Some(Self::loom_path),     // ly
+            0x6c6d => Some(Self::loom_image),    // lm
+            0x6c6e => Some(Self::loom_surface),  // ln
+
             // Colour utilities
             0x6361 => Some(Self::rgba), // ca
             0x6362 => Some(Self::rgb),  // cb
@@ -644,6 +706,16 @@ impl Opcode {
             Self::draw_line => *b"dl",
             Self::draw_text => *b"dt",
             Self::set_font => *b"sf",
+            Self::render_loom => *b"rl",
+            Self::loom_box => *b"lb",
+            Self::loom_circle => *b"lk",
+            Self::loom_text => *b"lx",
+            Self::loom_button => *b"lu",
+            Self::loom_group => *b"lw",
+            Self::loom_line => *b"lj",
+            Self::loom_path => *b"ly",
+            Self::loom_image => *b"lm",
+            Self::loom_surface => *b"ln",
             Self::rgba => *b"ca",
             Self::rgb => *b"cb",
             Self::call => *b"cn",

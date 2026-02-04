@@ -196,8 +196,8 @@ mod tests {
     fn test_capsule_roundtrip() {
         // Build bytecode
         let bytecode = Program::new()
-            .clear(VsfType::rk)
-            .fill_rect(0.0, 0.0, 0.5, 0.5, VsfType::rw)
+            .clear(VsfType::rck)
+            .fill_rect(0.0, 0.0, 0.5, 0.5, VsfType::rcw)
             .hl()
             .build();
 

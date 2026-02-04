@@ -84,11 +84,17 @@ pub mod canvas;
 /// Bytecode builder with chainable opcode methods
 pub mod builder;
 
+/// Loom: hierarchical layout/GUI system
+pub mod loom;
+
 /// Capsule: signed executable bundle
 pub mod capsule;
 
 /// VSF bytecode parser
 pub mod bytecode;
+
+/// Drawing primitives (line, path, etc.)
+pub mod drawing;
 
 /// Placeholder module for future capability system
 pub mod capability {
