@@ -102,6 +102,14 @@ function render() {
         const rgba = currentVM.get_canvas_rgba();
         log(`Got ${rgba.length} bytes of RGBA data`, 'info');
 
+        // Sample first 20 pixels to see what colors we're actually rendering
+        const samples = [];
+        for (let i = 0; i < Math.min(20, rgba.length / 4); i++) {
+            const idx = i * 4;
+            samples.push(`[${rgba[idx]},${rgba[idx+1]},${rgba[idx+2]},${rgba[idx+3]}]`);
+        }
+        log(`First pixels: ${samples.join(' ')}`, 'info');
+
         const width = currentVM.width();
         const height = currentVM.height();
         log(`VM canvas size: ${width}x${height}`, 'info');
@@ -149,9 +157,9 @@ function setupCanvas() {
 
 // Handle resolution (temporary local mapping, will become FGTW later)
 const handleMap = {
-    'red box test': 'capsules/red_box_test.vsf',
-    'green box test': 'capsules/green_box_test.vsf',
-    'blue circle test': 'capsules/blue_circle_test.vsf',
+    'redbox': 'capsules/redbox.vsf',
+    'greenbox': 'capsules/greenbox.vsf',
+    'bluecircle': 'capsules/bluecircle.vsf',
 };
 
 async function resolveHandle(handleName) {
@@ -171,51 +179,48 @@ async function resolveHandle(handleName) {
             throw new Error(`HTTP ${response.status}`);
         }
         const arrayBuffer = await response.arrayBuffer();
-        const capsuleBytes = new Uint8Array(arrayBuffer);
-        log(`Loaded ${capsuleBytes.length} bytes from ${filename}`, 'info');
-        return capsuleBytes;
+        const capsuleData = new Uint8Array(arrayBuffer);
+        log(`Loaded ${capsuleData.length} bytes from ${filename}`, 'info');
+
+        // Use WASM load_capsule to parse VSF and extract executable bytecode
+        const bytecode = wasmModule.load_capsule(capsuleData);
+        log(`Extracted ${bytecode.length} bytes of executable bytecode`, 'info');
+        return bytecode;
     } catch (err) {
-        log(`Failed to fetch capsule: ${err.message}`, 'error');
+        log(`Failed to load capsule: ${err.message}`, 'error');
         return null;
     }
 }
 
 async function loadAndRenderCapsule(handleName) {
-    const capsuleBytes = await resolveHandle(handleName);
-    if (!capsuleBytes) return;
+    const bytecode = await resolveHandle(handleName);
+    if (!bytecode) return;
 
-    // Build bytecode: {ps} + capsule + {rl} + {hl}
-    const bytecode = new Uint8Array(
-        4 + capsuleBytes.length + 4 + 4
-    );
+    log('Creating VM with executable bytecode...', 'info');
 
-    let offset = 0;
-    // {ps}
-    bytecode.set([0x7b, 0x70, 0x73, 0x7d], offset);
-    offset += 4;
-    // capsule data
-    bytecode.set(capsuleBytes, offset);
-    offset += capsuleBytes.length;
-    // {rl}
-    bytecode.set([0x7b, 0x72, 0x6c, 0x7d], offset);
-    offset += 4;
-    // {hl}
-    bytecode.set([0x7b, 0x68, 0x6c, 0x7d], offset);
+    // Debug: dump bytecode hex
+    const hex = Array.from(bytecode).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
+    log(`Bytecode (${bytecode.length} bytes): ${hex.substring(0, 200)}...`, 'info');
 
-    log('Creating VM and rendering...', 'info');
     currentVM = createVM(bytecode);
     if (currentVM) {
         try {
             log('Running VM...', 'info');
-            const result = currentVM.run();
+            const result = currentVM.run(1000);  // Execute up to 1000 instructions
             log(`VM run() returned: ${result}`, 'info');
 
             log('Calling render()...', 'info');
             render();
             log(`Rendered: "${handleName}"`, 'info');
         } catch (err) {
-            log(`VM execution error: ${err.message}`, 'error');
-            console.error('Full error:', err);
+            log(`VM execution error: ${err}`, 'error');
+            log(`Error type: ${typeof err}`, 'error');
+            log(`Error message: ${err.message || 'none'}`, 'error');
+            log(`Error toString: ${err.toString()}`, 'error');
+            if (err.stack) {
+                log(`Stack: ${err.stack}`, 'error');
+            }
+            console.error('Full error object:', err);
         }
     }
 }

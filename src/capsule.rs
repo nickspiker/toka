@@ -93,12 +93,10 @@ impl CapsuleBuilder {
 
 /// A loaded and parsed Capsule
 pub struct Capsule {
-    /// Raw VSF file bytes
+    /// Raw VSF file bytes (for verification)
     raw: Vec<u8>,
-    /// Offset to bytecode section data
-    bytecode_offset: usize,
-    /// Length of bytecode section
-    bytecode_len: usize,
+    /// Extracted executable bytecode (raw VSF-encoded opcodes and values)
+    bytecode: Vec<u8>,
     /// Provenance hash (hp: content-addressed identity)
     provenance: Vec<u8>,
     /// Whether this capsule has an Ed25519 signature
@@ -108,7 +106,7 @@ pub struct Capsule {
 impl Capsule {
     /// Load a capsule from VSF bytes
     pub fn load(data: &[u8]) -> Result<Self, String> {
-        use vsf::file_format::VsfHeader;
+        use vsf::file_format::{VsfHeader, VsfSection};
         use vsf::types::VsfType;
 
         // Parse header
@@ -121,20 +119,57 @@ impl Capsule {
             _ => return Err("Capsule missing hp (provenance hash)".to_string()),
         };
 
-        // Find toka section
-        let bytecode_field = header
+        // Find toka section in header TOC
+        let section_toc = header
             .fields
             .iter()
             .find(|f| f.name == "toka")
             .ok_or("Capsule missing toka section")?;
+
+        // Parse the section body manually (since we don't include section name for <1MB files)
+        let mut ptr = section_toc.offset_bytes;
+
+        // Skip optional section markers (> and [)
+        if ptr < data.len() && data[ptr] == b')' {
+            ptr += 1;  // Skip TOC closing paren
+        }
+        if ptr < data.len() && data[ptr] == b'>' {
+            ptr += 1;  // Skip > marker
+        }
+        if ptr >= data.len() || data[ptr] != b'[' {
+            return Err(format!(
+                "Expected '[' at offset {} (found {:02x})",
+                ptr,
+                data.get(ptr).copied().unwrap_or(0)
+            ));
+        }
+        ptr += 1;  // Skip [
+
+        // Parse the field (which contains our bytecode values)
+        use vsf::file_format::VsfField;
+        let field = VsfField::parse(data, &mut ptr)
+            .map_err(|e| format!("Failed to parse main field: {}", e))?;
+
+        // Verify it's the "main" field
+        if field.name != "main" {
+            return Err(format!("Expected 'main' field, found '{}'", field.name));
+        }
+
+        // Re-encode just the field values as raw bytecode (with commas between values)
+        let mut bytecode = Vec::new();
+        for (i, value) in field.values.iter().enumerate() {
+            if i > 0 {
+                bytecode.push(b',');  // VSF parser expects commas between values
+            }
+            bytecode.extend_from_slice(&value.flatten());
+        }
 
         // Check if signed (has Ed25519 signature)
         let is_signed = header.signature.is_some();
 
         Ok(Self {
             raw: data.to_vec(),
-            bytecode_offset: bytecode_field.offset_bytes,
-            bytecode_len: bytecode_field.size_bytes,
+            bytecode,
             provenance,
             is_signed,
         })
@@ -169,7 +204,7 @@ impl Capsule {
 
     /// Get bytecode for VM execution
     pub fn bytecode(&self) -> &[u8] {
-        &self.raw[self.bytecode_offset..self.bytecode_offset + self.bytecode_len]
+        &self.bytecode
     }
 
     /// Get provenance hash (hp: content-addressed identity)

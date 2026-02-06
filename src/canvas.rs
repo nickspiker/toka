@@ -42,12 +42,6 @@ impl Canvas {
     pub fn new(width: usize, height: usize) -> Self {
         // Span: harmonic mean = 2wh/(w+h)
         // Smooth at w==h, biased toward smaller dimension, finite slope at axes
-        let span_px = if width + height > 0 {
-            2 * width * height / (width + height)
-        } else {
-            1
-        };
-
         // Opaque black in s44 RGBA: [0, 0, 0, 1]
         let black = [
             ScalarF4E4::ZERO,
@@ -59,7 +53,7 @@ impl Canvas {
         Self {
             width,
             height,
-            span: ScalarF4E4::from(span_px),
+            span: ScalarF4E4::from(width * height) / (width + height),
             ru: ScalarF4E4::ONE,
             half_dims: CircleF4E4::from((width, height)) >> 1,
             pixels: vec![black; width * height],
@@ -142,110 +136,102 @@ impl Canvas {
         self.pixels.fill([r, g, b, a]);
     }
 
+    /// Fill a rectangle (centered pixel coordinates)
+    ///
+    /// - cx, cy: center of rectangle in pixels relative to canvas center
+    /// - w, h: width and height in pixels
+    /// - colour: RGBA as [ScalarF4E4; 4]
+    pub fn fill_rect_px(
+        &mut self,
+        cx: isize,
+        cy: isize,
+        w: isize,
+        h: isize,
+        colour: [ScalarF4E4; 4],
+    ) {
+        // Canvas center
+        let center_x = (self.width >> 1) as isize;
+        let center_y = (self.height >> 1) as isize;
+
+        // Convert centered coords to top-left coords
+        let px = center_x + cx - w >> 1;
+        let py = center_y + cy - h >> 1;
+
+        // Clamp to canvas bounds
+        let x1 = px.clamp(0, self.width as isize) as usize;
+        let y1 = py.clamp(0, self.height as isize) as usize;
+        let x2 = (px + w).clamp(0, self.width as isize) as usize;
+        let y2 = (py + h).clamp(0, self.height as isize) as usize;
+
+        // Fill pixels (internal TL usize indexing)
+        for row in y1..y2 {
+            for col in x1..x2 {
+                let idx = row * self.width + col;
+                self.pixels[idx] = colour;
+            }
+        }
+    }
+
     /// Fill a rectangle (RU coordinates, center-origin)
     ///
-    /// Coordinates use Relative Units with (0,0) at center:
     /// - pos: center of rectangle (x, y) in RU as CircleF4E4
     /// - size: dimensions (w, h) in RU as CircleF4E4
     /// - colour: RGBA as [ScalarF4E4; 4]
-    /// - 1.0 RU = span * ru pixels
-    pub fn fill_rect(
-        &mut self,
-        pos: CircleF4E4,
-        size: CircleF4E4,
-        colour: [ScalarF4E4; 4],
-    ) {
-        // Extract x,y from pos and w,h from size
-        let x = pos.r();  // real component = x
-        let y = pos.i();  // imaginary component = y
+    /// - 1 RU = span * ru pixels
+    pub fn fill_rect_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, colour: [ScalarF4E4; 4]) {
+        let x = pos.r();
+        let y = pos.i();
         let w = size.r();
         let h = size.i();
 
-        // Convert RU coordinates to pixel coords
+        // Convert RU to centered pixels
         let cx = self.ru_to_px_x(x);
         let cy = self.ru_to_px_y(y);
         let pw = self.ru_to_px_w(w);
         let ph = self.ru_to_px_h(h);
 
-        // Compute corners (rect is centered at x,y)
-        let px = cx - pw / 2;
-        let py = cy - ph / 2;
+        self.fill_rect_px(cx, cy, pw, ph, colour);
+    }
 
-        // Clamp to canvas bounds
-        let x1 = px.max(0).min(self.width as isize);
-        let y1 = py.max(0).min(self.height as isize);
-        let x2 = (px + pw).max(0).min(self.width as isize);
-        let y2 = (py + ph).max(0).min(self.height as isize);
+    /// Set a single pixel (centered pixel coordinates)
+    ///
+    /// - x, y: pixel position relative to canvas center
+    /// - colour: RGBA as [ScalarF4E4; 4]
+    pub fn set_pixel_px(&mut self, x: isize, y: isize, colour: [ScalarF4E4; 4]) {
+        let center_x = (self.width >> 1) as isize;
+        let center_y = (self.height >> 1) as isize;
 
-        // Fill pixels
-        for row in y1..y2 {
-            for col in x1..x2 {
-                let idx = (row as usize) * self.width + (col as usize);
-                self.pixels[idx] = colour;
-            }
+        let px = center_x + x;
+        let py = center_y + y;
+
+        if (px as usize) < self.width && (py as usize) < self.height {
+            let idx = (py as usize) * self.width + (px as usize);
+            self.pixels[idx] = colour;
         }
     }
 
-    /// Fill a rectangle (viewport coordinates 0.0-1.0)
-    /// Origin at top-left, pos specifies top-left corner of rectangle.
-    /// - pos: top-left corner (x, y) in viewport coords as CircleF4E4
-    /// - size: dimensions (w, h) in viewport coords as CircleF4E4
+    /// Set a single pixel (RU coordinates, center-origin)
+    ///
+    /// - pos: pixel position (x, y) in RU as CircleF4E4
     /// - colour: RGBA as [ScalarF4E4; 4]
-    pub fn fill_rect_vp(
-        &mut self,
-        pos: CircleF4E4,
-        size: CircleF4E4,
-        colour: [ScalarF4E4; 4],
-    ) {
-        // Extract x,y from pos and w,h from size
-        let x = pos.r();
-        let y = pos.i();
-        let w = size.r();
-        let h = size.i();
-
-        // Convert viewport coords to pixel coords (Spirix math)
-        let width_s = ScalarF4E4::from(self.width);
-        let height_s = ScalarF4E4::from(self.height);
-
-        let px = (x * width_s).to_isize();
-        let py = (y * height_s).to_isize();
-        let pw = (w * width_s).to_isize();
-        let ph = (h * height_s).to_isize();
-
-        // Clamp to canvas bounds
-        let x1 = px.max(0).min(self.width as isize);
-        let y1 = py.max(0).min(self.height as isize);
-        let x2 = (px + pw).max(0).min(self.width as isize);
-        let y2 = (py + ph).max(0).min(self.height as isize);
-
-        // Fill pixels
-        for row in y1..y2 {
-            for col in x1..x2 {
-                let idx = (row as usize) * self.width + (col as usize);
-                self.pixels[idx] = colour;
-            }
-        }
+    pub fn set_pixel_ru(&mut self, pos: CircleF4E4, colour: [ScalarF4E4; 4]) {
+        let x = self.ru_to_px_x(pos.r());
+        let y = self.ru_to_px_y(pos.i());
+        self.set_pixel_px(x, y, colour);
     }
 
     /// Draw a single pixel (viewport coordinates)
     /// - pos: pixel position (x, y) in viewport coords as CircleF4E4
     /// - colour: RGBA as [ScalarF4E4; 4]
-    pub fn draw_pixel(
-        &mut self,
-        pos: CircleF4E4,
-        colour: [ScalarF4E4; 4],
-    ) {
+    pub fn draw_pixel(&mut self, pos: CircleF4E4, colour: [ScalarF4E4; 4]) {
         let x = pos.r();
         let y = pos.i();
 
-        let width_s = ScalarF4E4::from(self.width);
-        let height_s = ScalarF4E4::from(self.height);
-
-        let px = (x * width_s).to_isize();
-        let py = (y * height_s).to_isize();
+        let px = (x * self.width).to_isize();
+        let py = (y * self.height).to_isize();
 
         // Unsigned bounds check: negative values wrap to huge positive, fail automatically
-        if (px as u32) < self.width as u32 && (py as u32) < self.height as u32 {
+        if (px as usize) < self.width && (py as usize) < self.height {
             let idx = (py as usize) * self.width + (px as usize);
             self.pixels[idx] = colour;
         }
@@ -269,19 +255,14 @@ impl Canvas {
         let text_width = char_width * ScalarF4E4::from(text.len());
 
         let text_size = CircleF4E4::from((text_width, size));
-        self.fill_rect(pos, text_size, colour);
+        self.fill_rect_ru(pos, text_size, colour);
     }
 
     /// Fill a circle (RU coordinates, center-origin)
     /// - center: center point (x, y) in RU as CircleF4E4
     /// - radius: radius in RU as ScalarF4E4
     /// - colour: RGBA as [ScalarF4E4; 4]
-    pub fn fill_circle(
-        &mut self,
-        center: CircleF4E4,
-        radius: ScalarF4E4,
-        colour: [ScalarF4E4; 4],
-    ) {
+    pub fn fill_circle(&mut self, center: CircleF4E4, radius: ScalarF4E4, colour: [ScalarF4E4; 4]) {
         let cx = self.ru_to_px_x(center.r());
         let cy = self.ru_to_px_y(center.i());
         let r = self.ru_to_px_w(radius);
@@ -294,7 +275,7 @@ impl Canvas {
                 let dy = py - cy;
                 if dx * dx + dy * dy <= r * r {
                     // Bounds check
-                    if (px as u32) < self.width as u32 && (py as u32) < self.height as u32 {
+                    if (px as usize) < self.width && (py as usize) < self.height {
                         let idx = (py as usize) * self.width + (px as usize);
                         self.pixels[idx] = colour;
                     }
@@ -318,7 +299,7 @@ impl Canvas {
         let cx = self.ru_to_px_x(center.r());
         let cy = self.ru_to_px_y(center.i());
         let r_outer = self.ru_to_px_w(radius + stroke_width / ScalarF4E4::from(2));
-        let r_inner = self.ru_to_px_w(radius - stroke_width / ScalarF4E4::from(2)).max(0);
+        let r_inner = self.ru_to_px_w(radius - stroke_width >> 1).max(0);
 
         // Draw pixels in the annulus between inner and outer radius
         for py in (cy - r_outer)..=(cy + r_outer) {
@@ -329,7 +310,7 @@ impl Canvas {
 
                 if dist_sq >= r_inner * r_inner && dist_sq <= r_outer * r_outer {
                     // Bounds check
-                    if (px as u32) < self.width as u32 && (py as u32) < self.height as u32 {
+                    if (px as usize) < self.width && (py as usize) < self.height {
                         let idx = (py as usize) * self.width + (px as usize);
                         self.pixels[idx] = colour;
                     }
@@ -385,64 +366,42 @@ impl Canvas {
 
     /// Convert canvas pixels to RGBA byte array for browser ImageData
     ///
-    /// Converts s44 VSF RGB pixels to sRGB RGBA bytes [RR, GG, BB, AA]
-    ///
-    /// Pipeline:
-    /// 1. Gamma decode VSF RGB (gamma 2 = square)
-    /// 2. Apply VSF RGB → sRGB colour space transform matrix
-    /// 3. Apply sRGB OETF (piecewise gamma encoding)
-    /// 4. Quantize to u8 [0-255]
+    /// Proper VSF RGB → sRGB color pipeline (pure S44, no IEEE-754):
+    /// 1. Decode VSF gamma 2 (square to linearize)
+    /// 2. Transform linear VSF RGB → linear sRGB using matrix
+    /// 3. Encode with sRGB OETF (piecewise gamma)
+    /// 4. Quantize S44 [0-1] → u8 [0-255]
     pub fn to_rgba_bytes(&self) -> Vec<u8> {
-        use vsf::colour::convert::apply_matrix_3x3;
-        use vsf::colour::VSF_RGB2SRGB;
+        use spirix::ScalarF4E4;
+        use vsf::colour::convert::{
+            apply_matrix_3x3_s44, linearize_gamma2_s44, srgb_oetf_s44, vsf_rgb2srgb_s44,
+        };
 
         self.pixels
             .iter()
-            .flat_map(|&[r, g, b, a]| {
-                // 1. Gamma decode: VSF RGB uses gamma 2 (square for decode)
-                let r_lin = (r * r).to_f32();
-                let g_lin = (g * g).to_f32();
-                let b_lin = (b * b).to_f32();
+            .flat_map(|&[r_vsf, g_vsf, b_vsf, a]| {
+                // 1. Decode VSF gamma 2: encoded^2 → linear
+                let r_lin_vsf = linearize_gamma2_s44(r_vsf);
+                let g_lin_vsf = linearize_gamma2_s44(g_vsf);
+                let b_lin_vsf = linearize_gamma2_s44(b_vsf);
 
-                // 2. Color space transform: Linear VSF RGB → Linear sRGB
-                let srgb_lin = apply_matrix_3x3(&VSF_RGB2SRGB, &[r_lin, g_lin, b_lin]);
+                // 2. Color space transform: linear VSF RGB → linear sRGB
+                let [r_lin_srgb, g_lin_srgb, b_lin_srgb] =
+                    apply_matrix_3x3_s44(&vsf_rgb2srgb_s44(), &[r_lin_vsf, g_lin_vsf, b_lin_vsf]);
 
-                // 3. Apply sRGB OETF (gamma encode for display)
-                let r_enc = srgb_oetf(srgb_lin[0]);
-                let g_enc = srgb_oetf(srgb_lin[1]);
-                let b_enc = srgb_oetf(srgb_lin[2]);
+                // 3. Apply sRGB OETF (gamma encoding for display)
+                let r_srgb = srgb_oetf_s44(r_lin_srgb);
+                let g_srgb = srgb_oetf_s44(g_lin_srgb);
+                let b_srgb = srgb_oetf_s44(b_lin_srgb);
 
-                // 4. Quantize to u8
-                let r8 = (r_enc * 256.0) as u8;
-                let g8 = (g_enc * 256.0) as u8;
-                let b8 = (b_enc * 256.0) as u8;
-                let a8 = (a << 8isize).to_u8();
-
-                [r8, g8, b8, a8]
+                [
+                    (r_srgb << 8isize).to_u8(),
+                    (g_srgb << 8isize).to_u8(),
+                    (b_srgb << 8isize).to_u8(),
+                    (a << 8isize).to_u8(),
+                ]
             })
             .collect()
-    }
-}
-
-/// sRGB OETF (Opto-Electronic Transfer Function) in Scalar space
-///
-/// Converts linear sRGB [0, 1] to gamma-encoded sRGB [0, 1]
-///
-/// Piecewise function per IEC 61966-2-1:1999:
-/// - Linear segment: if linear ≤ 0.0031308, encoded = 12.92 × linear
-/// - Gamma segment: if linear > 0.0031308, encoded = 1.055 × linear^(1/2.4) - 0.055
-///
-/// # Arguments
-/// * `linear` - Linear sRGB value in range [0.0, 1.0]
-///
-/// # Returns
-/// Gamma-encoded sRGB value in range [0.0, 1.0]
-fn srgb_oetf(linear: f32) -> f32 {
-    let clamped = linear.clamp(0.0, 1.0);
-    if clamped <= 0.0031308 {
-        clamped * 12.92
-    } else {
-        1.055 * clamped.powf(1.0 / 2.4) - 0.055
     }
 }
 
@@ -495,7 +454,12 @@ mod tests {
             ScalarF4E4::from(1) / ScalarF4E4::from(2), // w = 0.5 = 50 pixels
             ScalarF4E4::from(1) / ScalarF4E4::from(2), // h = 0.5 = 50 pixels
         ));
-        let white = [ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE];
+        let white = [
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+        ];
 
         canvas.fill_rect(pos, size, white);
 
@@ -539,7 +503,12 @@ mod tests {
             ScalarF4E4::from(1) / ScalarF4E4::from(2), // w = 0.5
             ScalarF4E4::from(1) / ScalarF4E4::from(2), // h = 0.5
         ));
-        let white = [ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE];
+        let white = [
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+        ];
 
         canvas.fill_rect_vp(pos, size, white);
 
@@ -577,7 +546,12 @@ mod tests {
         // Fill circle at center with radius = 0.25 RU (25 pixels)
         let center = CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::ZERO));
         let radius = ScalarF4E4::from(1) / ScalarF4E4::from(4); // 0.25 = 25 pixels
-        let white = [ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE];
+        let white = [
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+        ];
 
         canvas.fill_circle(center, radius, white);
 
@@ -586,7 +560,12 @@ mod tests {
         assert_eq!(canvas.pixels()[center_px], white);
 
         // Check corner pixel is still black
-        let black = [ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ZERO, ScalarF4E4::ONE];
+        let black = [
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ZERO,
+            ScalarF4E4::ONE,
+        ];
         assert_eq!(canvas.pixels()[0], black);
     }
 
@@ -605,13 +584,21 @@ mod tests {
         let center = CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::ZERO));
         let radius = ScalarF4E4::from(1) / ScalarF4E4::from(4); // 0.25 = 25 pixels
         let stroke_width = ScalarF4E4::from(1) / ScalarF4E4::from(20); // 0.05 = 5 pixels
-        let white = [ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE, ScalarF4E4::ONE];
+        let white = [
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+            ScalarF4E4::ONE,
+        ];
 
         canvas.stroke_circle(center, radius, stroke_width, white);
 
         // The exact pixel values depend on implementation, just verify no crash
         // and that some pixels changed
         let white_count = canvas.pixels().iter().filter(|&&p| p == white).count();
-        assert!(white_count > 0, "Expected some white pixels from circle stroke");
+        assert!(
+            white_count > 0,
+            "Expected some white pixels from circle stroke"
+        );
     }
 }

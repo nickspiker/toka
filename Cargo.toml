@@ -19,7 +19,7 @@ path = "src/main.rs"
 [dependencies]
 # Core dependencies for deterministic computation
 spirix = { version = "0.0.6", path = "../spirix" }
-vsf = { version = "0.2.3", path = "../vsf", default-features = false, features = ["spirix", "crypto"] }
+vsf = { version = "0.3.0", path = "../vsf", default-features = false, features = ["spirix", "crypto"] }
 
 # getrandom with WASM support - Both 0.2 (js) and 0.3 (wasm_js) are used by dependencies
 # We need to explicitly enable WASM features for both versions

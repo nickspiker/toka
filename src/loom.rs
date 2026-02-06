@@ -272,8 +272,21 @@ impl LayoutNode {
     pub fn render(&self, canvas: &mut Canvas, bounds: &LayoutBounds) {
         match self {
             LayoutNode::Box { colour, children, .. } => {
-                // Fill rectangle with colour
-                canvas.fill_rect_vp(bounds.pos, bounds.size, *colour);
+                // Convert viewport bounds (0-1, TL origin) to centered pixels
+                let width_s = ScalarF4E4::from(canvas.width());
+                let height_s = ScalarF4E4::from(canvas.height());
+
+                // TL viewport → TL pixels
+                let tl_x = (bounds.pos.r() * width_s).to_isize();
+                let tl_y = (bounds.pos.i() * height_s).to_isize();
+                let w = (bounds.size.r() * width_s).to_isize();
+                let h = (bounds.size.i() * height_s).to_isize();
+
+                // Compute center in centered pixel coords
+                let cx = tl_x + w / 2 - (canvas.width() / 2) as isize;
+                let cy = tl_y + h / 2 - (canvas.height() / 2) as isize;
+
+                canvas.fill_rect_px(cx, cy, w, h, *colour);
 
                 // Render children
                 for child in children {
@@ -290,10 +303,9 @@ impl LayoutNode {
                 }
             }
 
-            LayoutNode::Circle { radius, colour, .. } => {
-                // Convert radius from parent-relative to absolute
-                // Use parent width for radius scaling
-                let abs_radius = *radius * bounds.size.r();
+            LayoutNode::Circle { colour, .. } => {
+                // bounds.size already contains the absolute radius from compute_bounds
+                let abs_radius = bounds.size.r();
 
                 // Circle needs to be rendered in RU coordinates, but bounds are in viewport
                 // For now, use viewport rendering (future: convert to RU for aspect-correct circles)
@@ -354,7 +366,17 @@ impl LayoutNode {
             LayoutNode::Button { label, variant: _, colour, .. } => {
                 // TODO: Reference photon/src/ui/compositing.rs for button rendering
                 // For now, render as coloured box with text
-                canvas.fill_rect_vp(bounds.pos, bounds.size, *colour);
+
+                // Convert viewport bounds to centered pixels
+                let width_s = ScalarF4E4::from(canvas.width());
+                let height_s = ScalarF4E4::from(canvas.height());
+                let tl_x = (bounds.pos.r() * width_s).to_isize();
+                let tl_y = (bounds.pos.i() * height_s).to_isize();
+                let w = (bounds.size.r() * width_s).to_isize();
+                let h = (bounds.size.i() * height_s).to_isize();
+                let cx = tl_x + w / 2 - (canvas.width() / 2) as isize;
+                let cy = tl_y + h / 2 - (canvas.height() / 2) as isize;
+                canvas.fill_rect_px(cx, cy, w, h, *colour);
 
                 // Draw label in center
                 let text_size = bounds.size.i() * ScalarF4E4::from(5) / ScalarF4E4::from(10); // 50% of button height
@@ -384,7 +406,17 @@ impl LayoutNode {
             LayoutNode::Image { handle: _, tint, .. } => {
                 // TODO: Image rendering requires capability system
                 // Placeholder: draw coloured rectangle indicating image
-                canvas.fill_rect_vp(bounds.pos, bounds.size, *tint);
+
+                // Convert viewport bounds to centered pixels
+                let width_s = ScalarF4E4::from(canvas.width());
+                let height_s = ScalarF4E4::from(canvas.height());
+                let tl_x = (bounds.pos.r() * width_s).to_isize();
+                let tl_y = (bounds.pos.i() * height_s).to_isize();
+                let w = (bounds.size.r() * width_s).to_isize();
+                let h = (bounds.size.i() * height_s).to_isize();
+                let cx = tl_x + w / 2 - (canvas.width() / 2) as isize;
+                let cy = tl_y + h / 2 - (canvas.height() / 2) as isize;
+                canvas.fill_rect_px(cx, cy, w, h, *tint);
             }
 
             LayoutNode::Surface { handle: _, .. } => {
@@ -396,7 +428,17 @@ impl LayoutNode {
                     ScalarF4E4::from(5) / ScalarF4E4::from(10),
                     ScalarF4E4::ONE,
                 ];
-                canvas.fill_rect_vp(bounds.pos, bounds.size, gray);
+
+                // Convert viewport bounds to centered pixels
+                let width_s = ScalarF4E4::from(canvas.width());
+                let height_s = ScalarF4E4::from(canvas.height());
+                let tl_x = (bounds.pos.r() * width_s).to_isize();
+                let tl_y = (bounds.pos.i() * height_s).to_isize();
+                let w = (bounds.size.r() * width_s).to_isize();
+                let h = (bounds.size.i() * height_s).to_isize();
+                let cx = tl_x + w / 2 - (canvas.width() / 2) as isize;
+                let cy = tl_y + h / 2 - (canvas.height() / 2) as isize;
+                canvas.fill_rect_px(cx, cy, w, h, gray);
             }
         }
     }
@@ -409,7 +451,7 @@ impl LayoutNode {
         LayoutNode::Box {
             pos: vsf_box.pos,
             size: vsf_box.size,
-            colour: circle_to_rgba(&vsf_box.colour),
+            colour: vsf_box.colour, // RGBA passthrough
             children: vec![],
         }
     }
@@ -434,7 +476,7 @@ impl LayoutNode {
         LayoutNode::Circle {
             center: vsf_circle.pos,
             radius: vsf_circle.span,
-            colour: circle_to_rgba(&vsf_circle.colour),
+            colour: vsf_circle.colour, // RGBA passthrough
         }
     }
 
@@ -444,7 +486,7 @@ impl LayoutNode {
             start: vsf_line.start,
             end: vsf_line.end,
             width: vsf_line.width,
-            colour: circle_to_rgba(&vsf_line.colour),
+            colour: vsf_line.colour, // RGBA passthrough
         }
     }
 
@@ -454,7 +496,7 @@ impl LayoutNode {
             pos: vsf_text.pos,
             size: vsf_text.size.r(), // Use real component for font size
             content: vsf_text.content.clone(),
-            colour: circle_to_rgba(&vsf_text.colour),
+            colour: vsf_text.colour, // RGBA passthrough
         }
     }
 
@@ -471,7 +513,7 @@ impl LayoutNode {
             size: vsf_button.size,
             label: vsf_button.label.clone(),
             variant,
-            colour: circle_to_rgba(&vsf_button.colour),
+            colour: vsf_button.colour, // RGBA passthrough
         }
     }
 
@@ -499,7 +541,7 @@ impl LayoutNode {
             .collect();
 
         LayoutNode::Path {
-            colour: circle_to_rgba(&vsf_path.colour),
+            colour: vsf_path.colour, // RGBA passthrough
             stroke_width: vsf_path.width,
             commands,
         }
@@ -511,7 +553,7 @@ impl LayoutNode {
             pos: vsf_image.pos,
             size: vsf_image.size,
             handle: vsf_image.handle,
-            tint: circle_to_rgba(&vsf_image.tint),
+            tint: vsf_image.tint, // RGBA passthrough
         }
     }
 
@@ -552,16 +594,6 @@ impl LayoutNode {
 /// - i() -> G
 /// - magnitude() -> B
 /// - phase()/magnitude() -> A (normalized)
-fn circle_to_rgba(colour: &CircleF4E4) -> [ScalarF4E4; 4] {
-    // Simple extraction - may need better colour space conversion
-    let r = colour.r();
-    let g = colour.i();
-    let mag = colour.magnitude();
-
-    // For now, use magnitude for B and full opacity for A
-    // TODO: Proper sRGBA encoding from Spirix Circle
-    [r, g, mag, ScalarF4E4::ONE]
-}
 
 #[cfg(test)]
 mod tests {

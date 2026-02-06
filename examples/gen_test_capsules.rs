@@ -1,55 +1,66 @@
-//! Generate test VSF capsules for handle resolution testing
+//! Generate test VSF capsules with executable Toka bytecode
 
-use spirix::{CircleF4E4, ScalarF4E4};
 use std::fs;
-use vsf::types::{TokaBox, TokaCircle};
+use toka::builder::Program;
+use toka::capsule::CapsuleBuilder;
+use vsf::types::VsfType;
 
 fn main() -> std::io::Result<()> {
-    // Create output directory
     fs::create_dir_all("www/capsules")?;
 
-    // Red box test
-    let red_box = TokaBox {
-        pos: CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::ZERO)),
-        size: CircleF4E4::from((ScalarF4E4::ONE, ScalarF4E4::ONE)),
-        colour: CircleF4E4::from((ScalarF4E4::ONE, ScalarF4E4::ZERO)),
-    };
-    let vt_capsule = red_box.to_vsf_type();
-    let bytes = vt_capsule.flatten();
-    fs::write("www/capsules/red_box_test.vsf", bytes)?;
-    println!("✓ Created red_box_test.vsf");
+    // Red box - fullscreen background (0,0 to 1,1 in RU coordinates)
+    let bytecode = Program::new()
+        .fill_rect(
+            0.0,  // x: center
+            0.0,  // y: center
+            1.0,  // width: 1 RU (fullscreen)
+            1.0,  // height: 1 RU (fullscreen)
+            VsfType::rcr,  // VSF pure red
+        )
+        .hl()  // halt
+        .build();
 
-    // Green box test
-    let green_box = TokaBox {
-        pos: CircleF4E4::from((
-            ScalarF4E4::from(1) / ScalarF4E4::from(4),
-            ScalarF4E4::from(1) / ScalarF4E4::from(4),
-        )),
-        size: CircleF4E4::from((
-            ScalarF4E4::ONE / ScalarF4E4::from(2),
-            ScalarF4E4::ONE / ScalarF4E4::from(2),
-        )),
-        colour: CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::ONE)),
-    };
-    let vt_capsule = green_box.to_vsf_type();
-    let bytes = vt_capsule.flatten();
-    fs::write("www/capsules/green_box_test.vsf", bytes)?;
-    println!("✓ Created green_box_test.vsf");
+    let bytes = CapsuleBuilder::new(bytecode)
+        .build()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    fs::write("www/capsules/redbox.vsf", bytes)?;
+    println!("✓ Created redbox.vsf");
 
-    // Blue circle test
-    let blue_circle = TokaCircle {
-        pos: CircleF4E4::from((
-            ScalarF4E4::ONE / ScalarF4E4::from(2),
-            ScalarF4E4::ONE / ScalarF4E4::from(2),
-        )),
-        span: ScalarF4E4::from(3) / ScalarF4E4::from(10),
-        colour: CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::ONE)),
-    };
-    let vt_capsule = blue_circle.to_vsf_type();
-    let bytes = vt_capsule.flatten();
-    fs::write("www/capsules/blue_circle_test.vsf", bytes)?;
-    println!("✓ Created blue_circle_test.vsf");
+    // Green box - centered quarter (0.25,0.25 to 0.75,0.75)
+    let bytecode = Program::new()
+        .fill_rect(
+            0.0,   // x: center
+            0.0,   // y: center
+            0.5,   // width: half screen
+            0.5,   // height: half screen
+            VsfType::rcn,  // VSF pure green
+        )
+        .hl()
+        .build();
 
-    println!("\nAll test capsules generated in www/capsules/");
+    let bytes = CapsuleBuilder::new(bytecode)
+        .build()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    fs::write("www/capsules/greenbox.vsf", bytes)?;
+    println!("✓ Created greenbox.vsf");
+
+    // Blue circle - centered with 0.3 RU radius
+    let bytecode = Program::new()
+        .fill_circle(
+            0.0,   // cx: center
+            0.0,   // cy: center
+            0.3,   // radius: 0.3 RU
+            VsfType::rcb,  // VSF pure blue
+        )
+        .hl()
+        .build();
+
+    let bytes = CapsuleBuilder::new(bytecode)
+        .build()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    fs::write("www/capsules/bluecircle.vsf", bytes)?;
+    println!("✓ Created bluecircle.vsf");
+
+    println!("\n✓ All test capsules generated with executable bytecode");
     Ok(())
 }

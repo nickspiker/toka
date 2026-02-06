@@ -232,12 +232,22 @@ impl VM {
     fn execute(&mut self, opcode: Opcode) -> Result<(), String> {
         match opcode {
             Opcode::push => {
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&format!("[VM] push: Starting at IP {}", self.ip).into());
+
                 if self.ip >= self.bytecode.len() {
                     return Err("Bytecode truncated in push".to_string());
                 }
                 let vsf_value = vsf_parse(&self.bytecode, &mut self.ip)
                     .map_err(|e| format!("push: failed to parse VSF value: {}", e))?;
+
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&format!("[VM] push: Parsed value, new IP {}", self.ip).into());
+
                 self.stack.push(vsf_value);
+
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&format!("[VM] push: Stack size now {}", self.stack.len()).into());
             }
 
             Opcode::pop => {
@@ -457,6 +467,8 @@ impl VM {
             }
 
             Opcode::halt => {
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&"[VM] halt: Halting VM".into());
                 self.halted = true;
             }
 
@@ -478,7 +490,7 @@ impl VM {
                     self.pop_s44()?,  // b
                     self.pop_s44()?,  // a
                 ];
-                self.canvas.fill_rect(pos, size, colour);
+                self.canvas.fill_rect_ru(pos, size, colour);
             }
 
             Opcode::draw_text => {
@@ -618,10 +630,15 @@ impl VM {
             // ==================== LOOM LAYOUT ====================
 
             Opcode::render_loom => {
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&"[VM] render_loom: Starting".into());
+
                 // Pop vt capsule containing Toka Tree layout node
                 let vsf_capsule = match self.stack.pop() {
                     Some(vsf @ VsfType::v(encoding, _)) => {
                         if encoding == b't' {
+                            #[cfg(target_arch = "wasm32")]
+                            web_sys::console::log_1(&"[VM] render_loom: Got vt capsule".into());
                             vsf
                         } else {
                             return Err(format!(
@@ -643,9 +660,15 @@ impl VM {
                 let vsf_node = vsf::decoding::toka_tree::parse_vt_toka_node(&vsf_capsule)
                     .map_err(|e| format!("Failed to parse vt Toka Tree capsule: {}", e))?;
 
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&format!("[VM] render_loom: Parsed node type").into());
+
                 // Convert VSF TokaNode to Toka LayoutNode
                 use crate::loom::LayoutNode;
                 let layout_node = LayoutNode::from_vsf_node(&vsf_node);
+
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&"[VM] render_loom: Converted to LayoutNode".into());
 
                 // Render to canvas using root viewport bounds
                 let root_bounds = crate::loom::LayoutBounds {
@@ -659,7 +682,13 @@ impl VM {
                     )),
                 };
 
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&"[VM] render_loom: Calling render()".into());
+
                 layout_node.render(&mut self.canvas, &root_bounds);
+
+                #[cfg(target_arch = "wasm32")]
+                web_sys::console::log_1(&"[VM] render_loom: Complete".into());
             }
 
             Opcode::loom_box => {
