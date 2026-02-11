@@ -154,6 +154,15 @@ pub struct VM {
 
     /// Scroll offset Y in RU (resolution-independent)
     scroll_y: ScalarF4E4,
+
+    /// Mouse/pointer X position in RU (resolution-independent)
+    mouse_x: ScalarF4E4,
+
+    /// Mouse/pointer Y position in RU (resolution-independent)
+    mouse_y: ScalarF4E4,
+
+    /// Current time in seconds (Unix timestamp as ScalarF4E4)
+    time: ScalarF4E4,
 }
 
 impl VM {
@@ -185,6 +194,9 @@ impl VM {
             scene_dirty: false,
             scroll_x: ScalarF4E4::ZERO,
             scroll_y: ScalarF4E4::ZERO,
+            mouse_x: ScalarF4E4::ZERO,
+            mouse_y: ScalarF4E4::ZERO,
+            time: ScalarF4E4::ZERO,
         }
     }
 
@@ -577,6 +589,78 @@ impl VM {
                 self.stack.push(result);
             }
 
+            // ==================== SCENE GRAPH CONSTRUCTION ====================
+
+            Opcode::build_row => {
+                // Build row: pop children (ron), rotate (s44), translate (c44)
+                // Stack: [..., translate_c44, rotate_s44, children_ron]
+                let children_vsf = self.pop()?;
+                let rotate_vsf = self.pop()?;
+                let translate_vsf = self.pop()?;
+
+                let translate = Self::extract_c44(&translate_vsf)?;
+                let rotate = Self::extract_s44(&rotate_vsf)?;
+
+                // Extract children from ron node
+                let children = match children_vsf {
+                    VsfType::ron(_, _, children_vec) => children_vec,
+                    _ => return Err(format!("build_row: expected ron for children, got {:?}", type_name(&children_vsf))),
+                };
+
+                let transform = vsf::types::Transform {
+                    translate: Some(translate),
+                    rotate: Some(rotate),
+                    scale: None,
+                    origin: None,
+                };
+
+                self.stack.push(VsfType::row(transform, children));
+            }
+
+            Opcode::build_rob => {
+                // Build rob: pop children (ron), fill (colour), size (c44), pos (c44)
+                // Stack: [..., pos_c44, size_c44, fill_colour, children_ron]
+                let children_vsf = self.pop()?;
+                let fill_vsf = self.pop()?;
+                let size_vsf = self.pop()?;
+                let pos_vsf = self.pop()?;
+
+                let pos = Self::extract_c44(&pos_vsf)?;
+                let size = Self::extract_c44(&size_vsf)?;
+
+                // Extract children from ron node
+                let children = match children_vsf {
+                    VsfType::ron(_, _, children_vec) => children_vec,
+                    _ => return Err(format!("build_rob: expected ron for children, got {:?}", type_name(&children_vsf))),
+                };
+
+                // Build simple solid fill from colour
+                let fill = vsf::types::Fill::Solid(Box::new(fill_vsf));
+
+                self.stack.push(VsfType::rob(pos, size, fill, None, children));
+            }
+
+            Opcode::build_roc => {
+                // Build roc: pop fill (colour), radius (s44), center (c44)
+                // Stack: [..., center_c44, radius_s44, fill_colour]
+                let fill_vsf = self.pop()?;
+                let radius_vsf = self.pop()?;
+                let center_vsf = self.pop()?;
+
+                let center = Self::extract_c44(&center_vsf)?;
+                let radius = Self::extract_s44(&radius_vsf)?;
+
+                // Build simple solid fill from colour
+                let fill = vsf::types::Fill::Solid(Box::new(fill_vsf));
+
+                self.stack.push(VsfType::roc(center, radius, fill, None));
+            }
+
+            Opcode::build_transform => {
+                // Not needed - use build_row directly
+                return Err("build_transform: use build_row instead".to_string());
+            }
+
             // ==================== LOOM LAYOUT ====================
 
             Opcode::render_loom => {
@@ -603,6 +687,21 @@ impl VM {
                 self.stack.push(VsfType::s44(self.scroll_y));
             }
 
+            Opcode::mouse_x => {
+                // Push current mouse/pointer X position (in RU)
+                self.stack.push(VsfType::s44(self.mouse_x));
+            }
+
+            Opcode::mouse_y => {
+                // Push current mouse/pointer Y position (in RU)
+                self.stack.push(VsfType::s44(self.mouse_y));
+            }
+
+            Opcode::timestamp => {
+                // Push current time (Unix timestamp in seconds)
+                self.stack.push(VsfType::s44(self.time));
+            }
+
             _ => {
                 return Err(format!(
                     "[IP:{}] Opcode not yet implemented: {:?}",
@@ -612,6 +711,22 @@ impl VM {
         }
 
         Ok(())
+    }
+
+    // Type extraction helpers
+
+    fn extract_s44(vsf: &VsfType) -> Result<ScalarF4E4, String> {
+        match vsf {
+            VsfType::s44(s) => Ok(*s),
+            _ => Err(format!("Expected s44, got {:?}", type_name(vsf))),
+        }
+    }
+
+    fn extract_c44(vsf: &VsfType) -> Result<CircleF4E4, String> {
+        match vsf {
+            VsfType::c44(c) => Ok(*c),
+            _ => Err(format!("Expected c44, got {:?}", type_name(vsf))),
+        }
     }
 
     // Type-safe arithmetic dispatch - uses fully qualified VsfType:: to avoid naming conflicts
@@ -1010,6 +1125,42 @@ impl VM {
     /// Get scroll offset Y (in RU)
     pub fn scroll_y(&self) -> ScalarF4E4 {
         self.scroll_y
+    }
+
+    /// Set mouse/pointer X position (in RU)
+    pub fn set_mouse_x(&mut self, mouse_x: ScalarF4E4) {
+        self.mouse_x = mouse_x;
+    }
+
+    /// Set mouse/pointer Y position (in RU)
+    pub fn set_mouse_y(&mut self, mouse_y: ScalarF4E4) {
+        self.mouse_y = mouse_y;
+    }
+
+    /// Set mouse/pointer position (in RU)
+    pub fn set_mouse(&mut self, mouse_x: ScalarF4E4, mouse_y: ScalarF4E4) {
+        self.mouse_x = mouse_x;
+        self.mouse_y = mouse_y;
+    }
+
+    /// Get mouse/pointer X position (in RU)
+    pub fn mouse_x(&self) -> ScalarF4E4 {
+        self.mouse_x
+    }
+
+    /// Get mouse/pointer Y position (in RU)
+    pub fn mouse_y(&self) -> ScalarF4E4 {
+        self.mouse_y
+    }
+
+    /// Set current time (Unix timestamp in seconds)
+    pub fn set_time(&mut self, time: ScalarF4E4) {
+        self.time = time;
+    }
+
+    /// Get current time (Unix timestamp in seconds)
+    pub fn time(&self) -> ScalarF4E4 {
+        self.time
     }
 
     /// Re-render stored scene VSF to canvas (for resize handling)

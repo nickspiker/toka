@@ -285,6 +285,23 @@ pub enum Opcode {
     /// VSF: {hq}
     handle_query,
 
+    // ==================== SCENE GRAPH CONSTRUCTION ====================
+    /// Build rob (box): pop children, stroke, fill, size, pos; push rob
+    /// VSF: {kb}
+    build_rob,
+
+    /// Build roc (circle): pop stroke, fill, radius, center; push roc
+    /// VSF: {kc}
+    build_roc,
+
+    /// Build row (transform group): pop children, transform; push row
+    /// VSF: {kw}
+    build_row,
+
+    /// Build transform: pop origin, scale, rotate, translate; push transform struct
+    /// VSF: {kt}
+    build_transform,
+
     // ==================== LOOM LAYOUT ====================
     /// Pop layout_node; render to canvas
     /// VSF: {rl}
@@ -359,6 +376,14 @@ pub enum Opcode {
     /// Push scroll offset Y (in RU)
     /// VSF: {sy}
     scroll_y,
+
+    /// Push mouse/pointer X position (in RU)
+    /// VSF: {ox}
+    mouse_x,
+
+    /// Push mouse/pointer Y position (in RU)
+    /// VSF: {oy}
+    mouse_y,
 
     // ==================== ERROR HANDLING ====================
     /// Pop condition; halt if zero
@@ -477,6 +502,12 @@ impl Opcode {
             0x6863 => Some(Self::handle_call),  // hc
             0x6871 => Some(Self::handle_query), // hq
 
+            // Scene graph construction
+            0x6b62 => Some(Self::build_rob),       // kb
+            0x6b63 => Some(Self::build_roc),       // kc
+            0x6b77 => Some(Self::build_row),       // kw
+            0x6b74 => Some(Self::build_transform), // kt
+
             // Loom layout
             0x726c => Some(Self::render_loom),   // rl
 
@@ -507,6 +538,8 @@ impl Opcode {
             // Viewport state
             0x7378 => Some(Self::scroll_x), // sx
             0x7379 => Some(Self::scroll_y), // sy
+            0x6f78 => Some(Self::mouse_x),  // ox
+            0x6f79 => Some(Self::mouse_y),  // oy
 
             // Error handling
             0x6172 => Some(Self::assert), // ar
@@ -614,6 +647,10 @@ impl Opcode {
             Self::handle_write => *b"hw",
             Self::handle_call => *b"hc",
             Self::handle_query => *b"hq",
+            Self::build_rob => *b"kb",
+            Self::build_roc => *b"kc",
+            Self::build_row => *b"kw",
+            Self::build_transform => *b"kt",
             Self::render_loom => *b"rl",
             Self::rgba => *b"ca",
             Self::rgb => *b"cb",
@@ -631,6 +668,8 @@ impl Opcode {
             Self::timestamp => *b"tm",
             Self::scroll_x => *b"sx",
             Self::scroll_y => *b"sy",
+            Self::mouse_x => *b"ox",
+            Self::mouse_y => *b"oy",
             Self::assert => *b"ar",
             Self::halt => *b"hl",
             Self::debug_print => *b"db",

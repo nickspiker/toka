@@ -580,6 +580,66 @@ impl Program {
         self
     }
 
+    // ==================== SCENE GRAPH CONSTRUCTION ====================
+
+    /// Build row: pop children (ron), rotate (s44), translate (c44) → push row
+    /// VSF: {kw}
+    pub fn kw(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'k', b'w');
+        self
+    }
+
+    /// Build rob: pop children (ron), fill (colour), size (c44), pos (c44) → push rob
+    /// VSF: {kb}
+    pub fn kb(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'k', b'b');
+        self
+    }
+
+    /// Build roc: pop fill (colour), radius (s44), center (c44) → push roc
+    /// VSF: {kc}
+    pub fn kc(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'k', b'c');
+        self
+    }
+
+    // ==================== CONTEXT VARIABLES (Reactive) ====================
+
+    /// Push current time (Unix timestamp in seconds as S44)
+    /// VSF: {tm}
+    pub fn tm(mut self) -> Self {
+        emit_op(&mut self.bytecode, b't', b'm');
+        self
+    }
+
+    /// Push mouse/pointer X position (in RU)
+    /// VSF: {ox}
+    pub fn ox(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'o', b'x');
+        self
+    }
+
+    /// Push mouse/pointer Y position (in RU)
+    /// VSF: {oy}
+    pub fn oy(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'o', b'y');
+        self
+    }
+
+    /// Push scroll offset X (in RU)
+    /// VSF: {sx}
+    pub fn sx(mut self) -> Self {
+        emit_op(&mut self.bytecode, b's', b'x');
+        self
+    }
+
+    /// Push scroll offset Y (in RU)
+    /// VSF: {sy}
+    pub fn sy(mut self) -> Self {
+        emit_op(&mut self.bytecode, b's', b'y');
+        self
+    }
+
     // ==================== HALT ====================
 
     /// Halt execution
