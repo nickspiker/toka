@@ -138,6 +138,22 @@ pub struct VM {
 
     /// Canvas for drawing operations
     canvas: Canvas,
+
+    /// Execution trace for debugging (opcode names)
+    trace: Vec<String>,
+
+    /// Scene VSF storage (ro* type rendered by render_loom)
+    /// Enables efficient resize without re-executing bytecode
+    scene_vsf: Option<VsfType>,
+
+    /// Whether scene graph has been modified since last render
+    scene_dirty: bool,
+
+    /// Scroll offset X in RU (resolution-independent)
+    scroll_x: ScalarF4E4,
+
+    /// Scroll offset Y in RU (resolution-independent)
+    scroll_y: ScalarF4E4,
 }
 
 impl VM {
@@ -164,6 +180,11 @@ impl VM {
             function_map: HashMap::new(),
             halted: false,
             canvas: Canvas::new(width, height),
+            trace: Vec::new(),
+            scene_vsf: None,
+            scene_dirty: false,
+            scroll_x: ScalarF4E4::ZERO,
+            scroll_y: ScalarF4E4::ZERO,
         }
     }
 
@@ -209,6 +230,8 @@ impl VM {
                         ip_before, a as char, b as char
                     )
                 })?;
+                // Add to execution trace
+                self.trace.push(format!("{:?}", opcode));
                 self.execute(opcode)
                     .map_err(|e| format!("[IP:{}] {}", ip_before, e))?;
             }
@@ -232,22 +255,19 @@ impl VM {
     fn execute(&mut self, opcode: Opcode) -> Result<(), String> {
         match opcode {
             Opcode::push => {
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&format!("[VM] push: Starting at IP {}", self.ip).into());
-
                 if self.ip >= self.bytecode.len() {
                     return Err("Bytecode truncated in push".to_string());
                 }
                 let vsf_value = vsf_parse(&self.bytecode, &mut self.ip)
                     .map_err(|e| format!("push: failed to parse VSF value: {}", e))?;
 
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&format!("[VM] push: Parsed value, new IP {}", self.ip).into());
-
-                self.stack.push(vsf_value);
-
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&format!("[VM] push: Stack size now {}", self.stack.len()).into());
+                // If pushing a colour constant, expand to RGBA components (late binding)
+                // This allows display profiles to be applied at compositor level
+                if self.is_colour_constant(&vsf_value) {
+                    self.expand_colour_to_rgba(vsf_value)?;
+                } else {
+                    self.stack.push(vsf_value);
+                }
             }
 
             Opcode::pop => {
@@ -467,77 +487,7 @@ impl VM {
             }
 
             Opcode::halt => {
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&"[VM] halt: Halting VM".into());
                 self.halted = true;
-            }
-
-            Opcode::clear => {
-                // Pop RGBA as 4 separate s44 values (stack is LIFO, so reverse order)
-                let a = self.pop_s44()?;
-                let b = self.pop_s44()?;
-                let g = self.pop_s44()?;
-                let r = self.pop_s44()?;
-                self.canvas.clear(r, g, b, a);
-            }
-
-            Opcode::fill_rect => {
-                let size = self.pop_c44()?;   // (w, h)
-                let pos = self.pop_c44()?;    // (x, y)
-                let colour = [
-                    self.pop_s44()?,  // r
-                    self.pop_s44()?,  // g
-                    self.pop_s44()?,  // b
-                    self.pop_s44()?,  // a
-                ];
-                self.canvas.fill_rect_ru(pos, size, colour);
-            }
-
-            Opcode::draw_text => {
-                let size = self.pop_s44()?;
-                let pos = self.pop_c44()?;    // (x, y)
-                let text = match self.pop()? {
-                    VsfType::x(s) => s,
-                    VsfType::l(s) => s,
-                    other => {
-                        return Err(format!(
-                            "draw_text requires string, got {}",
-                            type_name(&other)
-                        ))
-                    }
-                };
-                let colour = [
-                    self.pop_s44()?,  // r
-                    self.pop_s44()?,  // g
-                    self.pop_s44()?,  // b
-                    self.pop_s44()?,  // a
-                ];
-                self.canvas.draw_text(pos, size, &text, colour);
-            }
-
-            Opcode::fill_circle => {
-                let radius = self.pop_s44()?;
-                let center = self.pop_c44()?;  // (x, y)
-                let colour = [
-                    self.pop_s44()?,  // r
-                    self.pop_s44()?,  // g
-                    self.pop_s44()?,  // b
-                    self.pop_s44()?,  // a
-                ];
-                self.canvas.fill_circle(center, radius, colour);
-            }
-
-            Opcode::stroke_circle => {
-                let stroke_width = self.pop_s44()?;
-                let radius = self.pop_s44()?;
-                let center = self.pop_c44()?;  // (x, y)
-                let colour = [
-                    self.pop_s44()?,  // r
-                    self.pop_s44()?,  // g
-                    self.pop_s44()?,  // b
-                    self.pop_s44()?,  // a
-                ];
-                self.canvas.stroke_circle(center, radius, stroke_width, colour);
             }
 
             Opcode::rgba => {
@@ -630,119 +580,27 @@ impl VM {
             // ==================== LOOM LAYOUT ====================
 
             Opcode::render_loom => {
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&"[VM] render_loom: Starting".into());
+                // Pop scene graph from stack (ro* type)
+                let vsf = self.stack.pop()
+                    .ok_or_else(|| "render_loom: stack underflow".to_string())?;
 
-                // Pop vt capsule containing Toka Tree layout node
-                let vsf_capsule = match self.stack.pop() {
-                    Some(vsf @ VsfType::v(encoding, _)) => {
-                        if encoding == b't' {
-                            #[cfg(target_arch = "wasm32")]
-                            web_sys::console::log_1(&"[VM] render_loom: Got vt capsule".into());
-                            vsf
-                        } else {
-                            return Err(format!(
-                                "render_loom expects vt capsule (Toka Tree), got encoding: {}",
-                                encoding as char
-                            ));
-                        }
-                    }
-                    Some(other) => {
-                        return Err(format!(
-                            "render_loom expects vt capsule, got: {:?}",
-                            type_name(&other)
-                        ))
-                    }
-                    None => return Err("render_loom: stack underflow".to_string()),
-                };
+                // Render directly from ro* type
+                let mut renderer = crate::renderer::RenderContext::new();
+                renderer.render(&vsf, &mut self.canvas)?;
 
-                // Parse vt wrapped Toka Tree node
-                let vsf_node = vsf::decoding::toka_tree::parse_vt_toka_node(&vsf_capsule)
-                    .map_err(|e| format!("Failed to parse vt Toka Tree capsule: {}", e))?;
-
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&format!("[VM] render_loom: Parsed node type").into());
-
-                // Convert VSF TokaNode to Toka LayoutNode
-                use crate::loom::LayoutNode;
-                let layout_node = LayoutNode::from_vsf_node(&vsf_node);
-
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&"[VM] render_loom: Converted to LayoutNode".into());
-
-                // Render to canvas using root viewport bounds
-                let root_bounds = crate::loom::LayoutBounds {
-                    pos: spirix::CircleF4E4::from((
-                        spirix::ScalarF4E4::ZERO,
-                        spirix::ScalarF4E4::ZERO,
-                    )),
-                    size: spirix::CircleF4E4::from((
-                        spirix::ScalarF4E4::ONE,
-                        spirix::ScalarF4E4::ONE,
-                    )),
-                };
-
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&"[VM] render_loom: Calling render()".into());
-
-                layout_node.render(&mut self.canvas, &root_bounds);
-
-                #[cfg(target_arch = "wasm32")]
-                web_sys::console::log_1(&"[VM] render_loom: Complete".into());
+                // Store VSF for resize handling (not LayoutNode!)
+                self.scene_vsf = Some(vsf);
+                self.scene_dirty = true;
             }
 
-            Opcode::loom_box => {
-                // TODO: Create box node and push to stack
-                // Needs VSF tTb type variant
-                return Err("loom_box not yet implemented (needs VSF tTb type)".to_string());
+            Opcode::scroll_x => {
+                // Push current scroll X offset (in RU)
+                self.stack.push(VsfType::s44(self.scroll_x));
             }
 
-            Opcode::loom_circle => {
-                // TODO: Create circle node and push to stack
-                // Needs VSF tTc type variant
-                return Err("loom_circle not yet implemented (needs VSF tTc type)".to_string());
-            }
-
-            Opcode::loom_text => {
-                // TODO: Create text node and push to stack
-                // Needs VSF tTt type variant
-                return Err("loom_text not yet implemented (needs VSF tTt type)".to_string());
-            }
-
-            Opcode::loom_button => {
-                // TODO: Create button node and push to stack
-                // Needs VSF tTu type variant
-                return Err("loom_button not yet implemented (needs VSF tTu type)".to_string());
-            }
-
-            Opcode::loom_group => {
-                // TODO: Create group node and push to stack
-                // Needs VSF tTg type variant
-                return Err("loom_group not yet implemented (needs VSF tTg type)".to_string());
-            }
-
-            Opcode::loom_line => {
-                // TODO: Create line node and push to stack
-                // Needs VSF tTl type variant
-                return Err("loom_line not yet implemented (needs VSF tTl type)".to_string());
-            }
-
-            Opcode::loom_path => {
-                // TODO: Create path node and push to stack
-                // Needs VSF tTp type variant
-                return Err("loom_path not yet implemented (needs VSF tTp type)".to_string());
-            }
-
-            Opcode::loom_image => {
-                // TODO: Create image node and push to stack
-                // Needs VSF tTi type variant
-                return Err("loom_image not yet implemented (needs VSF tTi type)".to_string());
-            }
-
-            Opcode::loom_surface => {
-                // TODO: Create surface node and push to stack
-                // Needs VSF tTs type variant
-                return Err("loom_surface not yet implemented (needs VSF tTs type)".to_string());
+            Opcode::scroll_y => {
+                // Push current scroll Y offset (in RU)
+                self.stack.push(VsfType::s44(self.scroll_y));
             }
 
             _ => {
@@ -987,6 +845,13 @@ impl VM {
         }
     }
 
+    fn pop_u3(&mut self) -> Result<u8, String> {
+        match self.pop()? {
+            VsfType::u3(u) => Ok(u),
+            other => Err(format!("Expected u3, got {}", type_name(&other))),
+        }
+    }
+
     #[allow(dead_code)]
     fn push_c44(&mut self, circle: CircleF4E4) {
         self.stack.push(VsfType::c44(circle));
@@ -1033,6 +898,52 @@ impl VM {
         Ok((r, g, b, a))
     }
 
+    /// Check if VsfType is a colour constant that should be expanded to RGBA
+    fn is_colour_constant(&self, v: &VsfType) -> bool {
+        matches!(
+            v,
+            VsfType::rck | // Black
+            VsfType::rcw | // White
+            VsfType::rcr | // Red
+            VsfType::rcn | // Green
+            VsfType::rcb | // Blue
+            VsfType::rcc | // Cyan
+            VsfType::rcj | // Magenta
+            VsfType::rcy | // Yellow
+            VsfType::rcg | // Gray
+            VsfType::rco | // Orange
+            VsfType::rcv | // Violet
+            VsfType::rcl | // Lime
+            VsfType::rcq   // Aqua
+        )
+    }
+
+    /// Expand colour constant to RGBA components on stack (late binding)
+    /// Converts from VSF RGB colour space to S44 RGBA components
+    /// Display profiles are applied later at compositor level
+    fn expand_colour_to_rgba(&mut self, colour: VsfType) -> Result<(), String> {
+        use vsf::colour::convert::RgbaLinear;
+
+        // Convert colour constant to linear RGBA
+        let rgba: RgbaLinear = colour
+            .to_rgba_linear()
+            .ok_or_else(|| format!("Colour type cannot be converted to RGBA: {:?}", colour))?;
+
+        // Convert to Spirix S44 and apply gamma 2 encoding (sqrt for display)
+        let r = ScalarF4E4::from(rgba.r).max(0).sqrt();
+        let g = ScalarF4E4::from(rgba.g).max(0).sqrt();
+        let b = ScalarF4E4::from(rgba.b).max(0).sqrt();
+        let a = ScalarF4E4::from(rgba.a).max(0).sqrt();
+
+        // Push RGBA components in reverse order (drawing opcodes pop r,g,b,a so we push a,b,g,r)
+        self.stack.push(VsfType::s44(a));
+        self.stack.push(VsfType::s44(b));
+        self.stack.push(VsfType::s44(g));
+        self.stack.push(VsfType::s44(r));
+
+        Ok(())
+    }
+
     /// Peek at top of stack without popping
     pub fn peek(&self) -> Option<&VsfType> {
         self.stack.last()
@@ -1052,6 +963,80 @@ impl VM {
     /// Get mutable reference to canvas (for zoom control)
     pub fn canvas_mut(&mut self) -> &mut Canvas {
         &mut self.canvas
+    }
+
+    /// Check if a scene has been rendered
+    pub fn has_scene(&self) -> bool {
+        self.scene_vsf.is_some()
+    }
+
+    /// Get reference to the stored scene VSF (if any)
+    pub fn scene_vsf(&self) -> Option<&VsfType> {
+        self.scene_vsf.as_ref()
+    }
+
+    /// Set the stored scene VSF (for resize handling)
+    pub fn set_scene_vsf(&mut self, vsf: VsfType) {
+        self.scene_vsf = Some(vsf);
+        self.scene_dirty = true;
+    }
+
+    /// Replace the canvas (for resize handling)
+    pub fn set_canvas(&mut self, canvas: Canvas) {
+        self.canvas = canvas;
+    }
+
+    /// Set scroll offset X (in RU)
+    pub fn set_scroll_x(&mut self, scroll_x: ScalarF4E4) {
+        self.scroll_x = scroll_x;
+    }
+
+    /// Set scroll offset Y (in RU)
+    pub fn set_scroll_y(&mut self, scroll_y: ScalarF4E4) {
+        self.scroll_y = scroll_y;
+    }
+
+    /// Set scroll offset (in RU)
+    pub fn set_scroll(&mut self, scroll_x: ScalarF4E4, scroll_y: ScalarF4E4) {
+        self.scroll_x = scroll_x;
+        self.scroll_y = scroll_y;
+    }
+
+    /// Get scroll offset X (in RU)
+    pub fn scroll_x(&self) -> ScalarF4E4 {
+        self.scroll_x
+    }
+
+    /// Get scroll offset Y (in RU)
+    pub fn scroll_y(&self) -> ScalarF4E4 {
+        self.scroll_y
+    }
+
+    /// Re-render stored scene VSF to canvas (for resize handling)
+    ///
+    /// This enables efficient window resize without re-executing bytecode.
+    /// The scene VSF is preserved from render_loom execution and can be
+    /// re-rasterized at any resolution.
+    pub fn rerender_scene(&mut self) -> Result<(), String> {
+        let scene_vsf = self
+            .scene_vsf
+            .as_ref()
+            .ok_or("No scene to render")?;
+
+        // Clear canvas to black (opaque black = 0xFF000000)
+        self.canvas.clear(0xFF000000);
+
+        // Re-render scene using renderer
+        let mut renderer = crate::renderer::RenderContext::new();
+        renderer.render(scene_vsf, &mut self.canvas)?;
+        self.scene_dirty = false;
+
+        Ok(())
+    }
+
+    /// Get and clear execution trace
+    pub fn take_trace(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.trace)
     }
 
     /// Get stack slice (for testing)

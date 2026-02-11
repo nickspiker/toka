@@ -84,8 +84,8 @@ pub mod canvas;
 /// Bytecode builder with chainable opcode methods
 pub mod builder;
 
-/// Loom: hierarchical layout/GUI system
-pub mod loom;
+/// Direct VSF ro* to Canvas renderer
+pub mod renderer;
 
 /// Capsule: signed executable bundle
 pub mod capsule;
@@ -115,6 +115,20 @@ pub mod wasm {
     use crate::vm::VM;
     use spirix::ScalarF4E4;
     use wasm_bindgen::prelude::*;
+
+    #[wasm_bindgen]
+    extern "C" {
+        /// Platform-independent logging to HTML console
+        ///
+        /// Routes log messages to the app.js log() function which displays them in the
+        /// HTML console element. This allows logging to work on any platform, not just browsers.
+        ///
+        /// # Parameters
+        /// - `message` - The log message
+        /// - `log_type` - Message type: "info", "error", "warn"
+        #[wasm_bindgen(js_name = log)]
+        pub fn js_log(message: &str, log_type: &str);
+    }
 
     /// WASM-friendly VM wrapper for browser execution
     #[wasm_bindgen]
@@ -161,37 +175,9 @@ pub mod wasm {
         ///
         /// Returns Vec<u8> with format [R, G, B, A, R, G, B, A, ...]
         /// suitable for `new ImageData(new Uint8ClampedArray(bytes), width, height)`
-        /// (Internally stored as ARGB 0xAARRGGBB, converted to RGBA bytes here)
+        /// Zero-cost transmute from internal u32 buffer
         pub fn get_canvas_rgba(&self) -> Vec<u8> {
-            let rgba = self.vm.canvas().to_rgba_bytes();
-
-            // Debug: log first few pixels and center pixel
-            web_sys::console::log_1(
-                &format!(
-                    "WASM: First pixel RGBA: {} {} {} {}",
-                    rgba[0], rgba[1], rgba[2], rgba[3]
-                )
-                .into(),
-            );
-
-            let w = self.vm.canvas().width();
-            let h = self.vm.canvas().height();
-            let center_idx = (h / 2) * w + (w / 2);
-            let center_rgba_idx = center_idx * 4;
-            web_sys::console::log_1(
-                &format!(
-                    "WASM: Center pixel ({},{}) RGBA: {} {} {} {}",
-                    w / 2,
-                    h / 2,
-                    rgba[center_rgba_idx],
-                    rgba[center_rgba_idx + 1],
-                    rgba[center_rgba_idx + 2],
-                    rgba[center_rgba_idx + 3]
-                )
-                .into(),
-            );
-
-            rgba
+            self.vm.canvas().to_rgba_bytes().to_vec()
         }
 
         /// Get canvas width in pixels
@@ -202,6 +188,11 @@ pub mod wasm {
         /// Get canvas height in pixels
         pub fn height(&self) -> usize {
             self.vm.canvas().height()
+        }
+
+        /// Get and clear execution trace (list of opcodes executed)
+        pub fn get_trace(&mut self) -> Vec<String> {
+            self.vm.take_trace()
         }
 
         /// Check if VM has halted
@@ -248,21 +239,86 @@ pub mod wasm {
             self.vm.canvas().span().to_f64()
         }
 
+        /// Set scroll offset (in RU)
+        ///
+        /// Programs can read scroll via {sx} and {sy} opcodes.
+        /// Call `rerun()` after changing scroll to re-execute bytecode with new values.
+        pub fn set_scroll(&mut self, scroll_x: f64, scroll_y: f64) {
+            self.vm.set_scroll(ScalarF4E4::from(scroll_x), ScalarF4E4::from(scroll_y));
+        }
+
+        /// Get scroll offset X (in RU)
+        pub fn get_scroll_x(&self) -> f64 {
+            self.vm.scroll_x().to_f64()
+        }
+
+        /// Get scroll offset Y (in RU)
+        pub fn get_scroll_y(&self) -> f64 {
+            self.vm.scroll_y().to_f64()
+        }
+
         /// Re-run the bytecode (re-execute from beginning)
         ///
-        /// Use after adjusting zoom to re-render with new RU multiplier.
+        /// Use after adjusting zoom or scroll to re-render with new values.
         pub fn rerun(&mut self, bytecode: Vec<u8>) -> Result<bool, String> {
-            // Create a new VM with same dimensions but new bytecode
+            // Save state
             let w = self.vm.canvas().width();
             let h = self.vm.canvas().height();
             let ru = self.vm.canvas().ru();
+            let scroll_x = self.vm.scroll_x();
+            let scroll_y = self.vm.scroll_y();
 
+            // Create new VM with same state
             self.vm = crate::vm::VM::with_canvas(bytecode, w, h);
             self.vm.canvas_mut().set_ru(ru);
+            self.vm.set_scroll(scroll_x, scroll_y);
 
             // Run to completion
             self.vm.run().map_err(|e| e.to_string())?;
             Ok(!self.vm.is_halted())
+        }
+
+        /// Resize canvas and re-render scene graph (efficient resize path)
+        ///
+        /// This avoids re-executing bytecode by reusing the stored scene graph.
+        /// Much faster than creating a new VM and re-running bytecode.
+        ///
+        /// # Arguments
+        /// - `width` - New canvas width in pixels
+        /// - `height` - New canvas height in pixels
+        ///
+        /// # Returns
+        /// - Ok(()) if resize succeeded
+        /// - Err(String) if no scene graph exists or rendering failed
+        pub fn resize(&mut self, width: usize, height: usize) -> Result<(), String> {
+            use crate::canvas::Canvas;
+
+            // Save scene VSF and zoom level
+            let scene = self.vm.scene_vsf().cloned();
+            let ru = self.vm.canvas().ru();
+
+            // Create new canvas with new dimensions
+            let mut new_canvas = Canvas::new(width, height);
+            new_canvas.set_ru(ru);
+
+            // Replace canvas (preserving VM state)
+            self.vm.set_canvas(new_canvas);
+
+            // Re-render scene VSF if it exists
+            if let Some(scene_vsf) = scene {
+                self.vm.set_scene_vsf(scene_vsf);
+                self.vm.rerender_scene()?;
+            }
+
+            Ok(())
+        }
+
+        /// Check if VM has a scene VSF ready to render
+        ///
+        /// Returns true if render_loom has been executed and a scene VSF is stored.
+        /// This indicates that resize() can be used instead of re-executing bytecode.
+        pub fn has_scene(&self) -> bool {
+            self.vm.scene_vsf().is_some()
         }
     }
 
@@ -284,13 +340,10 @@ pub mod wasm {
         // Verify authenticity and integrity (signature if signed, hb if unsigned)
         capsule.verify()?;
 
-        // Log provenance for browser console debugging
-        web_sys::console::log_1(
-            &format!("Capsule loaded: provenance {}", capsule.provenance_hex()).into(),
-        );
+        let bytecode = capsule.bytecode().to_vec();
 
         // Return bytecode
-        Ok(capsule.bytecode().to_vec())
+        Ok(bytecode)
     }
 
     /// Get provenance hash from a capsule without loading full VM
@@ -304,19 +357,31 @@ pub mod wasm {
         Ok(capsule.provenance_hex())
     }
 
+    /// Inspect a VSF capsule and return formatted output (vsfinfo style, no ANSI colors)
+    ///
+    /// Returns the same inspector view as vsfinfo, but without ANSI color codes
+    /// so it displays properly in browser console.
+    #[wasm_bindgen]
+    pub fn inspect_capsule(capsule_data: Vec<u8>) -> Result<String, String> {
+        use vsf::inspect::inspect_vsf_plain;
+
+        // Format the VSF file in literal format (vsfinfo style) without ANSI codes
+        inspect_vsf_plain(&capsule_data)
+    }
+
     /// Generate example bytecode programs
     ///
     /// Returns properly formatted VSF bytecode for testing.
     #[wasm_bindgen]
     pub fn generate_fill_red_bytecode() -> Vec<u8> {
         use crate::builder::Program;
+        // Simple test bytecode - immediate mode drawing removed
         Program::new()
             .ps_s44(1) // r = 1.0
             .ps_s44(0) // g = 0.0
             .ps_s44(0) // b = 0.0
             .ps_s44(1) // a = 1.0
-            .ca() // build ARGB colour (0xAARRGGBB)
-            .cr() // clear canvas
+            .ca() // build RGBA colour components
             .hl() // halt
             .build()
     }

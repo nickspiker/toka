@@ -285,88 +285,10 @@ pub enum Opcode {
     /// VSF: {hq}
     handle_query,
 
-    // ==================== DRAWING ====================
-    /// Pop rgba_u32; fill entire viewport
-    /// VSF: {cr}
-    clear,
-
-    /// Pop rgba_u32, h, w, y, x; fill rectangle
-    /// VSF: {fr}
-    fill_rect,
-
-    /// Pop rgba_u32, stroke_w, h, w, y, x; stroke outline
-    /// VSF: {sr}
-    stroke_rect,
-
-    /// Pop rgba_u32, r, cy, cx; fill circle
-    /// VSF: {fc}
-    fill_circle,
-
-    /// Pop rgba_u32, stroke_w, r, cy, cx; stroke outline
-    /// VSF: {so}
-    stroke_circle,
-
-    /// Pop rgba_u32, stroke_w, y2, x2, y1, x1; draw line
-    /// VSF: {dl}
-    draw_line,
-
-    /// Pop rgba_u32, size, y, x, string; render text
-    /// VSF: {dt}
-    draw_text,
-
-    /// Pop font_handle; set current font
-    /// VSF: {sf}
-    set_font,
-
     // ==================== LOOM LAYOUT ====================
     /// Pop layout_node; render to canvas
     /// VSF: {rl}
     render_loom,
-
-    /// Pop child_count, ...children, colour[4], size, pos; push box node
-    /// Stack: [..., pos:c44, size:c44, r,g,b,a:s44, child_count:u, ...children] -> [..., node]
-    /// VSF: {lb}
-    loom_box,
-
-    /// Pop colour[4], radius, center; push circle node
-    /// Stack: [..., center:c44, radius:s44, r,g,b,a:s44] -> [..., node]
-    /// VSF: {lk}
-    loom_circle,
-
-    /// Pop colour[4], content, size, pos; push text node
-    /// Stack: [..., pos:c44, size:s44, content:str, r,g,b,a:s44] -> [..., node]
-    /// VSF: {lx}
-    loom_text,
-
-    /// Pop colour[4], variant, label, size, pos; push button node
-    /// Stack: [..., pos:c44, size:c44, label:str, variant:u8, r,g,b,a:s44] -> [..., node]
-    /// VSF: {lu}
-    loom_button,
-
-    /// Pop child_count, ...children, size, pos; push group node
-    /// Stack: [..., pos:c44, size:c44, child_count:u, ...children] -> [..., node]
-    /// VSF: {lw}
-    loom_group,
-
-    /// Pop colour[4], width, end, start; push line node
-    /// Stack: [..., start:c44, end:c44, width:s44, r,g,b,a:s44] -> [..., node]
-    /// VSF: {lj}
-    loom_line,
-
-    /// Pop colour[4], stroke_width, cmd_count, ...commands; push path node
-    /// Stack: [..., cmd_count:u, ...commands, stroke_width:s44, r,g,b,a:s44] -> [..., node]
-    /// VSF: {ly}
-    loom_path,
-
-    /// Pop tint[4], handle, size, pos; push image node
-    /// Stack: [..., pos:c44, size:c44, handle:u64, r,g,b,a:s44] -> [..., node]
-    /// VSF: {lm}
-    loom_image,
-
-    /// Pop handle, size, pos; push surface node
-    /// Stack: [..., pos:c44, size:c44, handle:u64] -> [..., node]
-    /// VSF: {ln}
-    loom_surface,
 
     // ==================== COLOUR UTILITIES ====================
     /// Pop a, b, g, r (S44 0.0-1.0); push u32 RGBA
@@ -428,6 +350,15 @@ pub enum Opcode {
     /// Push current Unix timestamp (S44 seconds)
     /// VSF: {tm}
     timestamp,
+
+    // ==================== VIEWPORT STATE ====================
+    /// Push scroll offset X (in RU)
+    /// VSF: {sx}
+    scroll_x,
+
+    /// Push scroll offset Y (in RU)
+    /// VSF: {sy}
+    scroll_y,
 
     // ==================== ERROR HANDLING ====================
     /// Pop condition; halt if zero
@@ -546,27 +477,8 @@ impl Opcode {
             0x6863 => Some(Self::handle_call),  // hc
             0x6871 => Some(Self::handle_query), // hq
 
-            // Drawing
-            0x6372 => Some(Self::clear),         // cr
-            0x6672 => Some(Self::fill_rect),     // fr
-            0x7372 => Some(Self::stroke_rect),   // sr
-            0x6663 => Some(Self::fill_circle),   // fc
-            0x736f => Some(Self::stroke_circle), // so
-            0x646c => Some(Self::draw_line),     // dl
-            0x6474 => Some(Self::draw_text),     // dt
-            0x7366 => Some(Self::set_font),      // sf
-
             // Loom layout
             0x726c => Some(Self::render_loom),   // rl
-            0x6c62 => Some(Self::loom_box),      // lb
-            0x6c6b => Some(Self::loom_circle),   // lk
-            0x6c78 => Some(Self::loom_text),     // lx
-            0x6c75 => Some(Self::loom_button),   // lu
-            0x6c77 => Some(Self::loom_group),    // lw
-            0x6c6a => Some(Self::loom_line),     // lj
-            0x6c79 => Some(Self::loom_path),     // ly
-            0x6c6d => Some(Self::loom_image),    // lm
-            0x6c6e => Some(Self::loom_surface),  // ln
 
             // Colour utilities
             0x6361 => Some(Self::rgba), // ca
@@ -591,6 +503,10 @@ impl Opcode {
 
             // Time
             0x746d => Some(Self::timestamp), // tm
+
+            // Viewport state
+            0x7378 => Some(Self::scroll_x), // sx
+            0x7379 => Some(Self::scroll_y), // sy
 
             // Error handling
             0x6172 => Some(Self::assert), // ar
@@ -698,24 +614,7 @@ impl Opcode {
             Self::handle_write => *b"hw",
             Self::handle_call => *b"hc",
             Self::handle_query => *b"hq",
-            Self::clear => *b"cr",
-            Self::fill_rect => *b"fr",
-            Self::stroke_rect => *b"sr",
-            Self::fill_circle => *b"fc",
-            Self::stroke_circle => *b"so",
-            Self::draw_line => *b"dl",
-            Self::draw_text => *b"dt",
-            Self::set_font => *b"sf",
             Self::render_loom => *b"rl",
-            Self::loom_box => *b"lb",
-            Self::loom_circle => *b"lk",
-            Self::loom_text => *b"lx",
-            Self::loom_button => *b"lu",
-            Self::loom_group => *b"lw",
-            Self::loom_line => *b"lj",
-            Self::loom_path => *b"ly",
-            Self::loom_image => *b"lm",
-            Self::loom_surface => *b"ln",
             Self::rgba => *b"ca",
             Self::rgb => *b"cb",
             Self::call => *b"cn",
@@ -730,6 +629,8 @@ impl Opcode {
             Self::random_range => *b"rr",
             Self::blake3 => *b"bh",
             Self::timestamp => *b"tm",
+            Self::scroll_x => *b"sx",
+            Self::scroll_y => *b"sy",
             Self::assert => *b"ar",
             Self::halt => *b"hl",
             Self::debug_print => *b"db",
@@ -755,7 +656,7 @@ mod tests {
         let opcodes = [
             Opcode::push,
             Opcode::add,
-            Opcode::fill_rect,
+            Opcode::render_loom,
             Opcode::jump_if,
             Opcode::halt,
         ];
@@ -771,7 +672,7 @@ mod tests {
     fn test_opcode_display() {
         assert_eq!(format!("{}", Opcode::push), "{ps}");
         assert_eq!(format!("{}", Opcode::add), "{ad}");
-        assert_eq!(format!("{}", Opcode::fill_rect), "{fr}");
+        assert_eq!(format!("{}", Opcode::render_loom), "{rl}");
     }
 
     #[test]

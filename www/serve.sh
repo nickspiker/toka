@@ -14,5 +14,5 @@ if ! command -v basic-http-server &> /dev/null; then
     echo ""
 fi
 
-# Serve current directory on localhost:8000
-basic-http-server . -a 127.0.0.1:8000
+# Serve current directory on localhost:8000 with developer extensions (includes no-cache headers)
+basic-http-server . -a 127.0.0.1:8000 -x

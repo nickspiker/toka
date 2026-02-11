@@ -1,8 +1,6 @@
 // Toka VM Browser Integration
 // Loads WASM module and provides interactive example programs
 
-// Immediate log to verify module loads
-console.log('[APP.JS] Module loaded!');
 const consoleEl = document.getElementById('console');
 if (consoleEl) {
     const line = document.createElement('div');
@@ -25,14 +23,10 @@ function log(message, type = 'info') {
     line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
     consoleEl.appendChild(line);
     consoleEl.scrollTop = consoleEl.scrollHeight;
-
-    // Also log to browser console
-    if (type === 'error') {
-        console.error(message);
-    } else {
-        console.log(message);
-    }
 }
+
+// Expose log to WASM (wasm-bindgen needs it in global scope)
+window.log = log;
 
 // Status display (just logs to console now)
 function setStatus(message, isError = false) {
@@ -45,13 +39,16 @@ async function init() {
         log('Starting WASM initialization...', 'info');
         setStatus('Loading WASM module...');
 
-        // Import the WASM module
-        log('Importing module from ./pkg/toka.js', 'info');
-        const module = await import('./pkg/toka.js');
+        // Import the WASM module with cache-busting timestamp
+        const cacheBust = Date.now();
+        log(`Importing module from ./pkg/toka.js?v=${cacheBust}`, 'info');
+        const module = await import(`./pkg/toka.js?v=${cacheBust}`);
         log('Module imported successfully', 'info');
 
-        log('Calling module.default() to initialize WASM...', 'info');
-        await module.default();
+        // Initialize WASM with cache-busted binary URL
+        const wasmUrl = `./pkg/toka_bg.wasm?v=${cacheBust}`;
+        log(`Calling module.default() with ${wasmUrl}...`, 'info');
+        await module.default(wasmUrl);
         log('WASM initialized successfully', 'info');
 
         TokaVM = module.TokaVM;
@@ -97,37 +94,21 @@ function render() {
     }
 
     try {
-        // Get RGBA bytes from VM
-        log('Getting RGBA from VM...', 'info');
+        // Get RGBA bytes from VM and render to canvas
         const rgba = currentVM.get_canvas_rgba();
-        log(`Got ${rgba.length} bytes of RGBA data`, 'info');
-
-        // Sample first 20 pixels to see what colors we're actually rendering
-        const samples = [];
-        for (let i = 0; i < Math.min(20, rgba.length / 4); i++) {
-            const idx = i * 4;
-            samples.push(`[${rgba[idx]},${rgba[idx+1]},${rgba[idx+2]},${rgba[idx+3]}]`);
-        }
-        log(`First pixels: ${samples.join(' ')}`, 'info');
-
         const width = currentVM.width();
         const height = currentVM.height();
-        log(`VM canvas size: ${width}x${height}`, 'info');
 
-        // Create ImageData and render
         const imageData = new ImageData(
             new Uint8ClampedArray(rgba),
             width,
             height
         );
 
-        log('Putting ImageData to canvas...', 'info');
         ctx.putImageData(imageData, 0, 0);
-        log('ImageData rendered to canvas', 'info');
     } catch (err) {
         setStatus(`Render error: ${err.message}`, true);
         log(`Render error: ${err.message}`, 'error');
-        console.error('Render error:', err);
     }
 }
 
@@ -141,36 +122,47 @@ function setupCanvas() {
         canvas.width = window.innerWidth;
         canvas.height = window.innerHeight;
 
-        // Clear to black
-        ctx.fillStyle = '#000';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // Don't clear to black - let old content stretch until re-render completes
+        // This prevents black flash during resize
+    }
 
-        // Re-render if VM exists
-        if (currentVM) {
-            render();
+    // Resize handler - re-render scene graph immediately
+    function handleResize() {
+        const newWidth = window.innerWidth;
+        const newHeight = window.innerHeight;
+
+        if (currentVM && currentVM.has_scene()) {
+            // Efficient path: re-render scene graph at new resolution
+            try {
+                // 1. Render to new size in WASM (doesn't touch canvas)
+                currentVM.resize(newWidth, newHeight);
+
+                // 2. Update canvas size (clears it)
+                canvas.width = newWidth;
+                canvas.height = newHeight;
+
+                // 3. Immediately display new pixels (no black flash)
+                render();
+            } catch (err) {
+                log(`Resize error: ${err}`, 'error');
+            }
+        } else if (currentBytecode) {
+            // Fallback: no scene graph, re-execute bytecode (legacy mode)
+            canvas.width = newWidth;
+            canvas.height = newHeight;
+            reactiveRender();
         }
     }
 
     resizeCanvas();
-    window.addEventListener('resize', resizeCanvas);
+    window.addEventListener('resize', handleResize);
 }
 
 // Handle resolution (temporary local mapping, will become FGTW later)
-const handleMap = {
-    'redbox': 'capsules/redbox.vsf',
-    'greenbox': 'capsules/greenbox.vsf',
-    'bluecircle': 'capsules/bluecircle.vsf',
-};
-
+// Automatically maps: "box" → "capsules/box.vsf"
 async function resolveHandle(handleName) {
     const normalized = handleName.toLowerCase().trim();
-    const filename = handleMap[normalized];
-
-    if (!filename) {
-        log(`Unknown handle: "${handleName}"`, 'error');
-        log(`Available: ${Object.keys(handleMap).join(', ')}`, 'info');
-        return null;
-    }
+    const filename = `capsules/${normalized}.vsf`;
 
     try {
         log(`Resolving handle: "${handleName}"`, 'info');
@@ -182,36 +174,63 @@ async function resolveHandle(handleName) {
         const capsuleData = new Uint8Array(arrayBuffer);
         log(`Loaded ${capsuleData.length} bytes from ${filename}`, 'info');
 
+        // Show VSF inspector output (vsfinfo style) in app console
+        try {
+            const inspectorOutput = wasmModule.inspect_capsule(capsuleData);
+            // Log as a single pre-formatted block
+            const consoleEl = document.getElementById('console');
+            const pre = document.createElement('pre');
+            pre.className = 'console-line console-info';
+            pre.style.cssText = 'font-family: monospace; white-space: pre; margin: 5px 0; font-size: 10px;';
+            pre.textContent = inspectorOutput;
+            consoleEl.appendChild(pre);
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+        } catch (err) {
+            log(`Inspector failed: ${err}`, 'error');
+        }
+
         // Use WASM load_capsule to parse VSF and extract executable bytecode
         const bytecode = wasmModule.load_capsule(capsuleData);
         log(`Extracted ${bytecode.length} bytes of executable bytecode`, 'info');
+
         return bytecode;
     } catch (err) {
-        log(`Failed to load capsule: ${err.message}`, 'error');
+        log(`Failed to load capsule: ${err}`, 'error');
+        console.error('Capsule load error:', err);
         return null;
     }
 }
+
+let currentBytecode = null;  // Store bytecode for reactive rendering
 
 async function loadAndRenderCapsule(handleName) {
     const bytecode = await resolveHandle(handleName);
     if (!bytecode) return;
 
-    log('Creating VM with executable bytecode...', 'info');
+    currentBytecode = bytecode;  // Save for resize
+    reactiveRender();
+}
 
-    // Debug: dump bytecode hex
-    const hex = Array.from(bytecode).map(b => '0x' + b.toString(16).padStart(2, '0')).join(' ');
-    log(`Bytecode (${bytecode.length} bytes): ${hex.substring(0, 200)}...`, 'info');
+// Reactive rendering - re-executes program with current viewport dimensions
+function reactiveRender() {
+    if (!currentBytecode) return;
 
-    currentVM = createVM(bytecode);
+    log(`Creating VM with ${currentBytecode.length} bytes of bytecode...`, 'info');
+
+    currentVM = createVM(currentBytecode);
     if (currentVM) {
         try {
             log('Running VM...', 'info');
             const result = currentVM.run(1000);  // Execute up to 1000 instructions
-            log(`VM run() returned: ${result}`, 'info');
 
-            log('Calling render()...', 'info');
+            // Get and display execution trace
+            const trace = currentVM.get_trace();
+            if (trace.length > 0) {
+                log(`Executed ${trace.length} opcodes: ${trace.join(' → ')}`, 'info');
+            }
+
             render();
-            log(`Rendered: "${handleName}"`, 'info');
+            log('Rendered successfully', 'info');
         } catch (err) {
             log(`VM execution error: ${err}`, 'error');
             log(`Error type: ${typeof err}`, 'error');
@@ -220,7 +239,6 @@ async function loadAndRenderCapsule(handleName) {
             if (err.stack) {
                 log(`Stack: ${err.stack}`, 'error');
             }
-            console.error('Full error object:', err);
         }
     }
 }
@@ -238,12 +256,10 @@ function setupHandleInput() {
     log('Setting up handle input listener...', 'info');
 
     handleField.addEventListener('keypress', async (e) => {
-        log(`Key pressed: ${e.key}`, 'info');
         if (e.key === 'Enter') {
             const handle = handleField.value.trim();
-            log(`Enter pressed, handle value: "${handle}"`, 'info');
             if (handle) {
-                log(`Handle entered: "${handle}"`, 'info');
+                log(`Loading: ${handle}`, 'info');
                 handleInput.classList.add('hidden');
                 await loadAndRenderCapsule(handle);
             }

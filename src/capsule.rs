@@ -12,7 +12,9 @@
 //! use toka::builder::Program;
 //!
 //! let bytecode = Program::new()
-//!     .fill_rect(0.0, 0.0, 0.5, 0.5, VsfType::rw)
+//!     .ps_s44(1)
+//!     .ps_s44(1)
+//!     .ad()
 //!     .hl()
 //!     .build();
 //!
@@ -68,7 +70,7 @@ impl CapsuleBuilder {
         use vsf::decoding::parse;
         use vsf::file_format::VsfSection;
 
-        // Parse bytecode into VsfTypes (opcodes and scalars)
+        // Parse bytecode into VsfTypes (opcodes and data)
         let mut values = Vec::new();
         let mut ptr = 0;
         while ptr < self.bytecode.len() {
@@ -155,12 +157,9 @@ impl Capsule {
             return Err(format!("Expected 'main' field, found '{}'", field.name));
         }
 
-        // Re-encode just the field values as raw bytecode (with commas between values)
+        // Re-encode just the field values as raw bytecode (no commas - pure concatenation)
         let mut bytecode = Vec::new();
-        for (i, value) in field.values.iter().enumerate() {
-            if i > 0 {
-                bytecode.push(b',');  // VSF parser expects commas between values
-            }
+        for value in field.values.iter() {
             bytecode.extend_from_slice(&value.flatten());
         }
 
@@ -229,10 +228,11 @@ mod tests {
 
     #[test]
     fn test_capsule_roundtrip() {
-        // Build bytecode
+        // Build simple arithmetic bytecode
         let bytecode = Program::new()
-            .clear(VsfType::rck)
-            .fill_rect(0.0, 0.0, 0.5, 0.5, VsfType::rcw)
+            .ps_s44(1)
+            .ps_s44(1)
+            .ad()
             .hl()
             .build();
 

@@ -8,21 +8,11 @@
 //! use toka::builder::Program;
 //! use vsf::types::VsfType;
 //!
-//! // Draw a red square in the center (high-level API with VSF colours)
+//! // Simple arithmetic: 1 + 1 = 2
 //! let bytecode = Program::new()
-//!     .fill_rect(0.25, 0.25, 0.5, 0.5, VsfType::rr)  // VSF red
-//!     .hl()
-//!     .build();
-//!
-//! // Or use low-level opcodes for maximum control
-//! let bytecode = Program::new()
-//!     .ps_s44(1)      // push r=1
-//!     .ps_s44(0)      // push g=0
-//!     .ps_s44(0)      // push b=0
-//!     .cb()           // rgb (create colour)
-//!     .ps_c44(0.25,0.25)   // push x and y as Circle
-//!     .ps_c44(0.5,0.5)    // push width and height
-//!     .fr()           // fill_rect
+//!     .ps_s44(1)      // push 1
+//!     .ps_s44(1)      // push 1
+//!     .ad()           // add
 //!     .hl()           // halt
 //!     .build();
 //! ```
@@ -496,63 +486,6 @@ impl Program {
         self
     }
 
-    // ==================== DRAWING ====================
-
-    /// Clear canvas: pop colour (ARGB 0xAARRGGBB format)
-    /// VSF: {cr}
-    pub fn cr(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'c', b'r');
-        self
-    }
-
-    /// Fill rectangle: pop colour, h, w, y, x (viewport coords 0-1)
-    /// VSF: {fr}
-    pub fn fr(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'f', b'r');
-        self
-    }
-
-    /// Stroke rectangle: pop colour, h, w, y, x
-    /// VSF: {sr}
-    pub fn sr(mut self) -> Self {
-        emit_op(&mut self.bytecode, b's', b'r');
-        self
-    }
-
-    /// Fill circle: pop colour, radius, y, x
-    /// VSF: {fc}
-    pub fn fc(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'f', b'c');
-        self
-    }
-
-    /// Stroke circle: pop colour, radius, y, x
-    /// VSF: {so}
-    pub fn so(mut self) -> Self {
-        emit_op(&mut self.bytecode, b's', b'o');
-        self
-    }
-
-    /// Draw line: pop colour, y2, x2, y1, x1
-    /// VSF: {dl}
-    pub fn dl(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'd', b'l');
-        self
-    }
-
-    /// Draw text: pop colour, size, y, x, text
-    /// VSF: {dt}
-    pub fn dt(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'd', b't');
-        self
-    }
-
-    /// Set font: pop font_handle
-    /// VSF: {sf}
-    pub fn sf(mut self) -> Self {
-        emit_op(&mut self.bytecode, b's', b'f');
-        self
-    }
 
     // ==================== COLOUR UTILITIES ====================
 
@@ -577,167 +510,6 @@ impl Program {
         self
     }
 
-    // ==================== HIGH-LEVEL DRAWING HELPERS ====================
-    // These handle stack management and provide better ergonomics
-
-    /// Fill rectangle with explicit parameters (high-level helper)
-    ///
-    /// Pushes values in order and calls fill_rect opcode.
-    /// Uses RU (Relative Units) coordinates with center-origin.
-    ///
-    /// # Coordinate System
-    /// - (0, 0) = center of canvas
-    /// - Positive X = right, Positive Y = down
-    /// - 1 RU = span pixels (harmonic mean of width/height)
-    /// - Rectangle is centered at (x, y)
-    ///
-    /// # Arguments
-    /// * `x` - X center position in RU (0 = center)
-    /// * `y` - Y center position in RU (0 = center)
-    /// * `w` - Width in RU
-    /// * `h` - Height in RU
-    /// * `colour` - VSF colour type (e.g., VsfType::rr for red)
-    ///
-    /// # Example
-    /// ```ignore
-    /// use toka::builder::Program;
-    /// use vsf::types::VsfType;
-    ///
-    /// // Draw a red square in the center, 0.5 RU wide/tall
-    /// let bytecode = Program::new()
-    ///     .fill_rect(0, 0, 0.5, 0.5, VsfType::rr)
-    ///     .hl()
-    ///     .build();
-    /// ```
-    pub fn fill_rect(
-        self,
-        x: impl Into<ScalarF4E4>,
-        y: impl Into<ScalarF4E4>,
-        w: impl Into<ScalarF4E4>,
-        h: impl Into<ScalarF4E4>,
-        colour: VsfType,
-    ) -> Self {
-        use vsf::colour::convert::RgbLinear;
-
-        // Convert VSF colour to linear RGB, then to Spirix
-        let rgb: RgbLinear = colour
-            .to_rgb_linear()
-            .expect("VSF colour type must convert to RGB");
-
-        // Convert to Spirix and apply gamma 2 encoding (sqrt)
-        let r: ScalarF4E4 = ScalarF4E4::from(rgb.r).max(0).sqrt();
-        let g: ScalarF4E4 = ScalarF4E4::from(rgb.g).max(0).sqrt();
-        let b: ScalarF4E4 = ScalarF4E4::from(rgb.b).max(0).sqrt();
-
-        self.ps_s44(r)
-            .ps_s44(g)
-            .ps_s44(b)
-            .cb() // rgb
-            .ps_s44(x)
-            .ps_s44(y)
-            .ps_s44(w)
-            .ps_s44(h)
-            .fr() // fill_rect
-    }
-
-    /// Fill circle with explicit parameters (high-level helper)
-    ///
-    /// # Arguments
-    /// * `cx` - Center X in RU
-    /// * `cy` - Center Y in RU
-    /// * `radius` - Radius in RU
-    /// * `colour` - VSF colour type
-    pub fn fill_circle(
-        self,
-        cx: impl Into<ScalarF4E4>,
-        cy: impl Into<ScalarF4E4>,
-        radius: impl Into<ScalarF4E4>,
-        colour: VsfType,
-    ) -> Self {
-        use vsf::colour::convert::RgbLinear;
-
-        let rgb: RgbLinear = colour
-            .to_rgb_linear()
-            .expect("VSF colour type must convert to RGB");
-
-        // Convert to Spirix and apply gamma 2 encoding (sqrt)
-        let r: ScalarF4E4 = ScalarF4E4::from(rgb.r).max(0).sqrt();
-        let g: ScalarF4E4 = ScalarF4E4::from(rgb.g).max(0).sqrt();
-        let b: ScalarF4E4 = ScalarF4E4::from(rgb.b).max(0).sqrt();
-
-        self.ps_s44(r)
-            .ps_s44(g)
-            .ps_s44(b)
-            .cb() // rgb
-            .ps_s44(cx)
-            .ps_s44(cy)
-            .ps_s44(radius)
-            .fc() // fill_circle
-    }
-
-    /// Clear canvas to solid colour (fills entire canvas)
-    ///
-    /// # Arguments
-    /// * `colour` - VSF colour type
-    pub fn clear(self, colour: VsfType) -> Self {
-        use vsf::colour::convert::RgbLinear;
-
-        let rgb: RgbLinear = colour
-            .to_rgb_linear()
-            .expect("VSF colour type must convert to RGB");
-
-        // Convert to Spirix and apply gamma 2 encoding (sqrt)
-        let r = ScalarF4E4::from(rgb.r).max(0).sqrt();
-        let g = ScalarF4E4::from(rgb.g).max(0).sqrt();
-        let b = ScalarF4E4::from(rgb.b).max(0).sqrt();
-
-        self.ps_s44(r)
-            .ps_s44(g)
-            .ps_s44(b)
-            .cb() // rgb
-            .cr() // clear
-    }
-
-    /// Draw line with explicit parameters (high-level helper)
-    ///
-    /// # Arguments
-    /// * `x1` - Start X in RU
-    /// * `y1` - Start Y in RU
-    /// * `x2` - End X in RU
-    /// * `y2` - End Y in RU
-    /// * `stroke_w` - Stroke width in RU
-    /// * `colour` - VSF colour type
-    pub fn draw_line(
-        self,
-        x1: impl Into<ScalarF4E4>,
-        y1: impl Into<ScalarF4E4>,
-        x2: impl Into<ScalarF4E4>,
-        y2: impl Into<ScalarF4E4>,
-        stroke_w: impl Into<ScalarF4E4>,
-        colour: VsfType,
-    ) -> Self {
-        use vsf::colour::convert::RgbLinear;
-
-        let rgb: RgbLinear = colour
-            .to_rgb_linear()
-            .expect("VSF colour type must convert to RGB");
-
-        // Convert to Spirix and apply gamma 2 encoding (sqrt)
-        let r: ScalarF4E4 = ScalarF4E4::from(rgb.r).max(0).sqrt();
-        let g: ScalarF4E4 = ScalarF4E4::from(rgb.g).max(0).sqrt();
-        let b: ScalarF4E4 = ScalarF4E4::from(rgb.b).max(0).sqrt();
-
-        self.ps_s44(r)
-            .ps_s44(g)
-            .ps_s44(b)
-            .cb() // rgb
-            .ps_s44(x1)
-            .ps_s44(y1)
-            .ps_s44(x2)
-            .ps_s44(y2)
-            .ps_s44(stroke_w)
-            .dl() // draw_line
-    }
 
     // ==================== CONTROL FLOW ====================
 
@@ -796,6 +568,15 @@ impl Program {
         emit_op(&mut self.bytecode, b'j', b'z');
         self.bytecode
             .extend_from_slice(&VsfType::u(offset as usize, false).flatten());
+        self
+    }
+
+    // ==================== RENDERING ====================
+
+    /// Render Loom: pop scene graph from stack and render to canvas
+    /// VSF: {rl}
+    pub fn rl(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'r', b'l');
         self
     }
 
