@@ -112,12 +112,51 @@
             font-size: 12px;
             color: #888;
         }
+
+        .colour-picker {
+            position: sticky;
+            top: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 6px 0 8px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid #333;
+            background: rgba(0, 0, 0, 0.9);
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            color: #888;
+            z-index: 1;
+        }
+
+        .colour-swatch {
+            width: 18px;
+            height: 18px;
+            border: 1px solid #555;
+            border-radius: 2px;
+            flex-shrink: 0;
+        }
+
+        .colour-hex {
+            color: #e0e0e0;
+            letter-spacing: 0.05em;
+        }
+
+        .colour-coords {
+            color: #555;
+            margin-left: auto;
+        }
     </style>
 </head>
 <body>
     <canvas id="canvas"></canvas>
 
     <div class="console" id="console">
+        <div class="colour-picker" id="colourPicker">
+            <div class="colour-swatch" id="colourSwatch"></div>
+            <span class="colour-hex" id="colourHex">── ── ── ──</span>
+            <span class="colour-coords" id="colourCoords">x:─── y:───</span>
+        </div>
         <div class="console-line console-info">Console output:</div>
     </div>
 

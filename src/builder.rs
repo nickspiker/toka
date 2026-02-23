@@ -204,17 +204,17 @@ impl Program {
         self
     }
 
-    /// Reciprocal: pop a; push 1/a (works for all Spirix numeric types)
-    /// VSF: {rc}
-    pub fn rc(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'r', b'c');
-        self
-    }
-
     /// Modulo: pop b, a; push a%b
     /// VSF: {md}
     pub fn md(mut self) -> Self {
         emit_op(&mut self.bytecode, b'm', b'd');
+        self
+    }
+
+    /// Reciprocal: pop a; push 1/a (works for all Spirix numeric types)
+    /// VSF: {rc}
+    pub fn rc(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'r', b'c');
         self
     }
 
@@ -398,61 +398,33 @@ impl Program {
         self
     }
 
-    // ==================== LOGIC ====================
+    // ==================== BITWISE (All Numeric Types) ====================
 
-    /// Logical AND: pop b, a; push 1 if both truthy else 0
-    /// (Boolean logic: && not bitwise &)
+    /// Bitwise AND: pop b, a; push a & b (works on all Spirix numeric types)
     /// VSF: {an}
     pub fn an(mut self) -> Self {
         emit_op(&mut self.bytecode, b'a', b'n');
         self
     }
 
-    /// Logical OR: pop b, a; push 1 if either truthy else 0
-    /// (Boolean logic: || not bitwise |)
+    /// Bitwise OR: pop b, a; push a | b (works on all Spirix numeric types)
     /// VSF: {or}
     pub fn or(mut self) -> Self {
         emit_op(&mut self.bytecode, b'o', b'r');
         self
     }
 
-    /// Logical NOT: pop a; push 1 if zero else 0
+    /// Bitwise XOR: pop b, a; push a ^ b (works on all Spirix numeric types)
+    /// VSF: {xr}
+    pub fn xor(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'x', b'r');
+        self
+    }
+
+    /// Bitwise NOT: pop a; push ~a (works on all Spirix numeric types)
     /// VSF: {nt}
     pub fn nt(mut self) -> Self {
         emit_op(&mut self.bytecode, b'n', b't');
-        self
-    }
-
-    // ==================== BITWISE ====================
-
-    /// Bitwise AND: pop b, a; push a & b (bit-level AND via Spirix)
-    /// Uses Spirix's aligned_and for proper exponent alignment
-    /// VSF: {ba}
-    pub fn ba(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'b', b'a');
-        self
-    }
-
-    /// Bitwise OR: pop b, a; push a | b (bit-level OR via Spirix)
-    /// Uses Spirix's aligned_or for proper exponent alignment
-    /// VSF: {bo}
-    pub fn bo(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'b', b'o');
-        self
-    }
-
-    /// Bitwise XOR: pop b, a; push a ^ b (bit-level XOR via Spirix)
-    /// Uses Spirix's aligned_xor for proper exponent alignment
-    /// VSF: {bx}
-    pub fn bx(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'b', b'x');
-        self
-    }
-
-    /// Bitwise NOT: pop a; push ~a (bit-level complement via Spirix)
-    /// VSF: {bn}
-    pub fn bn(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'b', b'n');
         self
     }
 
@@ -487,30 +459,6 @@ impl Program {
     }
 
 
-    // ==================== COLOUR UTILITIES ====================
-
-    /// RGBA to colour: pop a, b, g, r (S44 0-1); push ARGB 0xAARRGGBB
-    /// VSF: {ca}
-    pub fn ca(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'c', b'a');
-        self
-    }
-
-    /// RGB to colour: pop b, g, r (S44 0-1); push ARGB 0xFFRRGGBB (opaque)
-    /// VSF: {cb}
-    pub fn cb(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'c', b'b');
-        self
-    }
-
-    /// Colour lerp: pop t, colour_b, colour_a; push interpolated colour
-    /// VSF: {ci}
-    pub fn ci(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'c', b'i');
-        self
-    }
-
-
     // ==================== CONTROL FLOW ====================
 
     /// Call function at bytecode offset (low-level - symbolic names TBD)
@@ -519,14 +467,6 @@ impl Program {
         emit_op(&mut self.bytecode, b'c', b'n');
         self.bytecode
             .extend_from_slice(&VsfType::u(offset as usize, false).flatten());
-        self
-    }
-
-    /// Call indirect: pop function handle from stack; call it
-    /// (Handle pushed by capability system or function reference)
-    /// VSF: {cd}
-    pub fn cd(mut self) -> Self {
-        emit_op(&mut self.bytecode, b'c', b'd');
         self
     }
 
@@ -562,16 +502,14 @@ impl Program {
         self
     }
 
-    /// Jump if zero: pop condition; jump if falsy
-    /// VSF: {jz}[offset:u]
-    pub fn jz(mut self, offset: u32) -> Self {
-        emit_op(&mut self.bytecode, b'j', b'z');
-        self.bytecode
-            .extend_from_slice(&VsfType::u(offset as usize, false).flatten());
+    // ==================== RENDERING ====================
+
+    /// Clear canvas: pop VSF colour (rc*, ra, rw) and fill canvas
+    /// VSF: {cr}
+    pub fn cr(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'c', b'r');
         self
     }
-
-    // ==================== RENDERING ====================
 
     /// Render Loom: pop scene graph from stack and render to canvas
     /// VSF: {rl}
@@ -695,24 +633,6 @@ mod tests {
 
         assert!(bytecode.len() > 0);
         // Bytecode contains push opcodes + s44 scalar encodings + add + halt
-    }
-
-    #[test]
-    fn test_colour_creation() {
-        // Create red colour (1, 0, 0)
-        let bytecode = Program::new()
-            .ps_s44(1) // push r
-            .ps_s44(0) // push g
-            .ps_s44(0) // push b
-            .cb() // rgb
-            .hl() // halt
-            .build();
-
-        // Bytecode contains: 3x{ps} + 3x s44 scalars + {cb} + {hl}
-        assert!(bytecode.len() > 0);
-        // Each ps_s44 is {ps} (4 bytes) + s44 encoding (~7 bytes) = ~11 bytes
-        // Plus {cb} (4 bytes) + {hl} (4 bytes) ≈ 41 bytes total
-        assert!(bytecode.len() > 30);
     }
 
     #[test]

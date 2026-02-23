@@ -519,7 +519,7 @@ python3 -m http.server 8000
 
 **WASM Tests:**
 - Visual verification in browser
-- Known bytecode → expected shapes/colors
+- Known bytecode → expected shapes/colours
 - Performance benchmarks
 
 ## Writing Toka Programs

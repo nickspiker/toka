@@ -107,21 +107,23 @@ handle_query     - Pop handle; push metadata struct
 
 ## Drawing (viewport-relative 0.0-1.0 as S44)
 ```
-clear            - Pop rgba_u32; fill entire viewport
-fill_rect        - Pop rgba_u32, h, w, y, x; fill rectangle
-stroke_rect      - Pop rgba_u32, stroke_w, h, w, y, x; stroke outline
-fill_circle      - Pop rgba_u32, r, cy, cx; fill circle
-stroke_circle    - Pop rgba_u32, stroke_w, r, cy, cx; stroke outline
-draw_line        - Pop rgba_u32, stroke_w, y2, x2, y1, x1; draw line
-draw_text        - Pop rgba_u32, size, y, x, string; render text
+clear            - Pop r, g, b, a (S44); clear canvas to colour
+fill_rect        - Pop r, g, b, a (S44), h, w, y, x; fill rectangle
+stroke_rect      - Pop r, g, b, a (S44), stroke_w, h, w, y, x; stroke outline
+fill_circle      - Pop r, g, b, a (S44), r, cy, cx; fill circle
+stroke_circle    - Pop r, g, b, a (S44), stroke_w, r, cy, cx; stroke outline
+draw_line        - Pop r, g, b, a (S44), stroke_w, y2, x2, y1, x1; draw line
+draw_text        - Pop r, g, b, a (S44), size, y, x, string; render text
 set_font         - Pop font_handle; set current font
+
+Note: Colour constants (rck, rcr, rcb, etc.) are expanded to 4 S44 RGBA components by the push opcode.
 ```
 
 ## Color Utilities
 ```
 rgba             - Pop a, b, g, r (S44 0.0-1.0); push u32 RGBA
 rgb              - Pop b, g, r (S44 0.0-1.0); push u32 RGBA (alpha=1.0)
-color_lerp       - Pop t, color_b, color_a; push interpolated u32 RGBA
+colour_lerp      - Pop t, colour_b, colour_a; push interpolated u32 RGBA
 hsla             - Pop a, l, s, h; push u32 RGBA
 ```
 

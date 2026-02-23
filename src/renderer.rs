@@ -4,7 +4,7 @@
 //! to the Canvas without any intermediate representation. Transforms are tracked
 //! as we traverse the scene graph hierarchy.
 
-use crate::canvas::Canvas;
+use crate::drawing::CanvasFast;
 use spirix::{CircleF4E4, ScalarF4E4};
 use vsf::types::{Fill, Transform, VsfType};
 
@@ -23,7 +23,7 @@ impl RenderContext {
     }
 
     /// Render a VSF renderable object to canvas
-    pub fn render(&mut self, vsf: &VsfType, canvas: &mut Canvas) -> Result<(), String> {
+    pub fn render(&mut self, vsf: &VsfType, canvas: &mut CanvasFast) -> Result<(), String> {
         match vsf {
             VsfType::rob(pos, size, fill, stroke, children) => {
                 self.render_box(pos, size, fill, stroke, children, canvas)
@@ -32,7 +32,6 @@ impl RenderContext {
                 self.render_circle(center, radius, fill, stroke, canvas)
             }
             VsfType::row(transform, children) => {
-                // Push transform, render children, pop transform
                 self.transform_stack.push(transform.clone());
                 for child in children {
                     self.render(child, canvas)?;
@@ -41,8 +40,6 @@ impl RenderContext {
                 Ok(())
             }
             VsfType::ron(_pos, _size, children) => {
-                // Container node - just render children
-                // TODO: Apply position/size bounds clipping
                 for child in children {
                     self.render(child, canvas)?;
                 }
@@ -60,43 +57,30 @@ impl RenderContext {
         fill: &Fill,
         stroke: &Option<vsf::types::Stroke>,
         children: &[VsfType],
-        canvas: &mut Canvas,
+        canvas: &mut CanvasFast,
     ) -> Result<(), String> {
-        // Apply current transforms
-        let world_pos = self.apply_transforms(*pos);
+        let world_pos  = self.apply_transforms(*pos);
         let world_size = self.apply_transforms_size(*size);
-        let rotation = self.get_cumulative_rotation();
+        let rotation   = self.get_cumulative_rotation();
 
-        // DEBUG: Log rotation angle
         #[cfg(target_arch = "wasm32")]
         crate::wasm::js_log(
-            &format!(
-                "Rotation angle: {} ({} degrees)",
-                rotation,
-                rotation * 180 / ScalarF4E4::PI
-            ),
+            &format!("Rotation angle: {} ({} degrees)", rotation, rotation * 180 / ScalarF4E4::PI),
             "info"
         );
 
-        // Render fill
         match fill {
             Fill::Solid(colour) => {
-                let rgba = extract_colour(colour)?;
-
-                // Always use rotated rectangle (handles zero rotation as axis-aligned)
-                canvas.fill_rotated_rect_ru(world_pos, world_size, rotation, rgba);
+                let u32_colour = extract_colour_u32(colour)?;
+                canvas.fill_rotated_rect_ru(world_pos, world_size, rotation, u32_colour);
             }
-            Fill::Gradient(_) => {
-                return Err("Gradients not implemented yet".to_string());
-            }
+            Fill::Gradient(_) => return Err("Gradients not implemented yet".to_string()),
         }
 
-        // Render stroke if present
         if stroke.is_some() {
             return Err("Strokes not implemented yet".to_string());
         }
 
-        // Render children
         for child in children {
             self.render(child, canvas)?;
         }
@@ -111,25 +95,19 @@ impl RenderContext {
         radius: &ScalarF4E4,
         fill: &Fill,
         stroke: &Option<vsf::types::Stroke>,
-        canvas: &mut Canvas,
+        canvas: &mut CanvasFast,
     ) -> Result<(), String> {
-        // Apply current transforms
         let world_center = self.apply_transforms(*center);
-        // TODO: Transform radius with scale
         let world_radius = *radius;
 
-        // Render fill
         match fill {
             Fill::Solid(colour) => {
-                let rgba = extract_colour(colour)?;
-                canvas.fill_circle(world_center, world_radius, rgba);
+                let u32_colour = extract_colour_u32(colour)?;
+                canvas.fill_circle(world_center, world_radius, u32_colour);
             }
-            Fill::Gradient(_) => {
-                return Err("Gradients not implemented yet".to_string());
-            }
+            Fill::Gradient(_) => return Err("Gradients not implemented yet".to_string()),
         }
 
-        // Render stroke if present
         if stroke.is_some() {
             return Err("Strokes not implemented yet".to_string());
         }
@@ -137,7 +115,6 @@ impl RenderContext {
         Ok(())
     }
 
-    /// Apply all transforms in the stack to a position
     fn apply_transforms(&self, pos: CircleF4E4) -> CircleF4E4 {
         let mut result = pos;
         for transform in &self.transform_stack {
@@ -146,9 +123,7 @@ impl RenderContext {
         result
     }
 
-    /// Apply all transforms in the stack to a size
     fn apply_transforms_size(&self, size: CircleF4E4) -> CircleF4E4 {
-        // For size, only apply scale transforms (not translation/rotation)
         let mut result = size;
         for transform in &self.transform_stack {
             if let Some(scale) = transform.scale {
@@ -158,42 +133,28 @@ impl RenderContext {
         result
     }
 
-    /// Get cumulative rotation angle from all transforms in the stack
     fn get_cumulative_rotation(&self) -> ScalarF4E4 {
-        let mut total_rotation = ScalarF4E4::ZERO;
+        let mut total = ScalarF4E4::ZERO;
         for transform in &self.transform_stack {
             if let Some(angle) = transform.rotate {
-                total_rotation = total_rotation + angle;
+                total = total + angle;
             }
         }
-        total_rotation
+        total
     }
 
-    /// Apply a single transform to a position
-    ///
-    /// Transform order (matches deleted loom.rs):
-    /// 1. Translate to origin
-    /// 2. Apply scale
-    /// 3. Apply rotation
-    /// 4. Translate back from origin
-    /// 5. Apply final translation
     fn apply_single_transform(&self, pos: CircleF4E4, t: &Transform) -> CircleF4E4 {
         let mut ru_x = pos.r();
         let mut ru_y = pos.i();
 
-        // 1. Translate to origin
         if let Some(origin) = t.origin {
             ru_x = ru_x - origin.r();
             ru_y = ru_y - origin.i();
         }
-
-        // 2. Apply scale
         if let Some(scale) = t.scale {
             ru_x = ru_x * scale.r();
             ru_y = ru_y * scale.i();
         }
-
-        // 3. Apply rotation
         if let Some(angle) = t.rotate {
             let cos = angle.cos();
             let sin = angle.sin();
@@ -202,14 +163,10 @@ impl RenderContext {
             ru_x = new_x;
             ru_y = new_y;
         }
-
-        // 4. Translate back from origin
         if let Some(origin) = t.origin {
             ru_x = ru_x + origin.r();
             ru_y = ru_y + origin.i();
         }
-
-        // 5. Apply final translation
         if let Some(translate) = t.translate {
             ru_x = ru_x + translate.r();
             ru_y = ru_y + translate.i();
@@ -219,46 +176,76 @@ impl RenderContext {
     }
 }
 
-/// Extract and convert VSF colour to packed u32 sRGB
+/// Extract a VSF colour as packed u32 sRGB for CanvasFast
 ///
-/// Pipeline: VSF colour constant → linear S44 RGBA → sRGB u8 → packed u32
-fn extract_colour(vsf: &VsfType) -> Result<u32, String> {
-    use vsf::colour::convert::{
-        apply_matrix_3x3_s44, linearize_gamma2_s44, srgb_oetf_s44, vsf_rgb2srgb_s44,
+/// Pipeline: VSF colour → linear sRGB → sRGB OETF → u8 → R<<24|G<<16|B<<8|A
+pub fn extract_colour_u32(vsf: &VsfType) -> Result<u32, String> {
+    let (r, g, b) = vsf
+        .to_srgb_u8_s44()
+        .ok_or_else(|| format!("Not a colour type: {:?}", vsf))?;
+    // Alpha: only ra/rt/rh/rw carry real alpha — everything else is opaque
+    let a: u8 = match vsf {
+        VsfType::ra([_, _, _, a]) => *a,
+        VsfType::rt([_, _, _, a]) => (*a >> 8) as u8,
+        VsfType::rh([_, _, _, a]) => (a * 255.0) as u8,
+        _ => 255,
     };
 
+    let packed = ((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | (a as u32);
+
+    #[cfg(target_arch = "wasm32")]
+    crate::wasm::js_log(&format!("extract_colour_u32: r={} g={} b={} a={} → {:08X}", r, g, b, a, packed), "info");
+
+    Ok(packed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vsf::types::VsfType;
+
+    #[test]
+    fn test_colour_extraction() {
+        let black = extract_colour_u32(&VsfType::rck).unwrap();
+        println!("rck  → {:08X}  (a={})", black, black & 0xFF);
+
+        let blue = extract_colour_u32(&VsfType::rcb).unwrap();
+        println!("rcb  → {:08X}  (a={})", blue, blue & 0xFF);
+
+        let red_half = extract_colour_u32(&VsfType::ra([255, 0, 0, 127])).unwrap();
+        println!("ra[255,0,0,127] → {:08X}  (a={})", red_half, red_half & 0xFF);
+
+        assert_eq!(black & 0xFF, 255, "black alpha");
+        assert_eq!(blue  & 0xFF, 255, "blue alpha");
+        assert_eq!(red_half & 0xFF, 127, "red half alpha");
+    }
+}
+
+/// Extract a VSF colour as linear S44 RGBA for CanvasQuality
+///
+/// Pipeline: VSF colour → linear RGBA S44 [R, G, B, A]
+/// Gamma-2 OETF is applied later at to_rgba_bytes(), not here.
+pub fn extract_colour_linear(vsf: &VsfType) -> Result<crate::drawing::Pixel, String> {
     let rgba = vsf
         .to_rgba_linear_s44()
         .ok_or_else(|| format!("Not a colour type: {:?}", vsf))?;
+    Ok([rgba.r, rgba.g, rgba.b, rgba.a])
+}
 
-    let [r_vsf, g_vsf, b_vsf, a] = [rgba.r, rgba.g, rgba.b, rgba.a];
+#[cfg(test)]
+mod roundtrip_tests {
+    use vsf::types::VsfType;
+    use vsf::decoding::parse::parse as vsf_parse;
 
-    // 1. Decode VSF gamma 2: encoded^2 → linear
-    let r_lin_vsf = linearize_gamma2_s44(r_vsf);
-    let g_lin_vsf = linearize_gamma2_s44(g_vsf);
-    let b_lin_vsf = linearize_gamma2_s44(b_vsf);
+    #[test]
+    fn test_ra_roundtrip() {
+        let ra = VsfType::ra([255, 0, 0, 127]);
+        let bytes = ra.flatten();
+        println!("ra flattened: {:02X?}", bytes);
 
-    // 2. Colour space transform: linear VSF RGB → linear sRGB
-    let [r_lin_srgb, g_lin_srgb, b_lin_srgb] =
-        apply_matrix_3x3_s44(&vsf_rgb2srgb_s44(), &[r_lin_vsf, g_lin_vsf, b_lin_vsf]);
-
-    // 3. Apply sRGB OETF (gamma encoding for display)
-    let r_srgb = srgb_oetf_s44(r_lin_srgb);
-    let g_srgb = srgb_oetf_s44(g_lin_srgb);
-    let b_srgb = srgb_oetf_s44(b_lin_srgb);
-
-    // 4. Quantize to u8 and pack into u32 (RGBA: R in low byte for little-endian)
-    let r = (r_srgb << 8isize).to_u8();
-    let g = (g_srgb << 8isize).to_u8();
-    let b = (b_srgb << 8isize).to_u8();
-    let a = (a << 8isize).to_u8();
-
-    // Pack as R | G<<8 | B<<16 | A<<24 (matches canvas.rs expected format)
-    let packed = (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | ((a as u32) << 24);
-
-    // DEBUG: Log colour packing
-    #[cfg(target_arch = "wasm32")]
-    crate::wasm::js_log(&format!("Colour: r={} g={} b={} a={} → {:08X}", r, g, b, a, packed), "info");
-
-    Ok(packed)
+        let mut offset = 0usize;
+        let parsed = vsf_parse(&bytes, &mut offset).unwrap();
+        println!("ra parsed back: {:?}", parsed);
+        assert!(matches!(parsed, VsfType::ra([255, 0, 0, 127])), "roundtrip failed: got {:?}", parsed);
+    }
 }

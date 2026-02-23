@@ -18,7 +18,7 @@ path = "src/main.rs"
 
 [dependencies]
 # Core dependencies for deterministic computation
-spirix = { version = "0.0.6", path = "../spirix" }
+spirix = { version = "0.0.7", path = "../spirix" }
 vsf = { version = "0.3.0", path = "../vsf", default-features = false, features = ["spirix", "crypto", "inspect"] }
 bytemuck = "1.14"
 

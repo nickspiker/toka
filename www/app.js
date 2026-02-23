@@ -98,6 +98,8 @@ function render() {
         const rgba = currentVM.get_canvas_rgba();
         const width = currentVM.width();
         const height = currentVM.height();
+        const mid = (Math.floor(height/2) * width + Math.floor(width/2)) * 4;
+        log(`[DBG] centre px bytes: ${[...rgba.slice(mid,mid+4)].map(v=>v.toString(16).padStart(2,'0').toUpperCase()).join(' ')}`, 'info');
 
         const imageData = new ImageData(
             new Uint8ClampedArray(rgba),
@@ -115,7 +117,8 @@ function render() {
 // Setup canvas
 function setupCanvas() {
     canvas = document.getElementById('canvas');
-    ctx = canvas.getContext('2d');
+    ctx = canvas.getContext('2d', { colorSpace: 'srgb', alpha: false });
+    log(`Canvas colour space: ${ctx.getContextAttributes?.()?.colorSpace ?? 'unknown'}`, 'info');
 
     // Set canvas size to window size
     function resizeCanvas() {
@@ -156,6 +159,50 @@ function setupCanvas() {
 
     resizeCanvas();
     window.addEventListener('resize', handleResize);
+
+    // Colour picker — samples canvas pixel under cursor, updates when console is open
+    const swatch = document.getElementById('colourSwatch');
+    const hex = document.getElementById('colourHex');
+    const coords = document.getElementById('colourCoords');
+
+    canvas.addEventListener('mousemove', (e) => {
+        const consoleEl = document.getElementById('console');
+        if (!consoleEl.classList.contains('visible')) return;
+
+        const [r, g, b, a] = ctx.getImageData(e.offsetX, e.offsetY, 1, 1).data;
+        const hexStr = [r, g, b, a].map(v => v.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+        swatch.style.background = `rgba(${r},${g},${b},${a / 255})`;
+        hex.textContent = hexStr;
+        coords.textContent = `x:${e.offsetX} y:${e.offsetY}`;
+    });
+}
+
+// Setup scroll tracking for reactive scenes
+function setupScrollTracking() {
+    let accumulatedScrollY = 0;
+
+    function handleWheel(e) {
+        if (!currentVM) return;
+
+        // Accumulate wheel delta
+        accumulatedScrollY += e.deltaY;
+        console.log(`[WHEEL] deltaY=${e.deltaY}, accumulated=${accumulatedScrollY}`);
+
+        // Update VM scroll state
+        currentVM.set_scroll(0, accumulatedScrollY);
+
+        // Re-run bytecode with new scroll value
+        try {
+            currentVM.reset();  // Reset IP to start
+            currentVM.run(1000);
+            render();
+        } catch (err) {
+            log(`Wheel render error: ${err}`, 'error');
+        }
+    }
+
+    window.addEventListener('wheel', handleWheel, { passive: true });
+    log('Wheel tracking enabled', 'info');
 }
 
 // Handle resolution (temporary local mapping, will become FGTW later)
@@ -276,6 +323,7 @@ function setupHandleInput() {
 async function main() {
     log('Application starting...', 'info');
     setupCanvas();
+    setupScrollTracking();
     await init();
     setupHandleInput();
     log('Toka VM ready - enter a handle name', 'info');

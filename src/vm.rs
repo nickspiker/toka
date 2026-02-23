@@ -21,7 +21,7 @@
 //! Type checking happens at build time via Rust's type system in the builder API.
 //! Runtime trusts the bytecode and relies on Rust panics/bounds checks for safety.
 
-use crate::canvas::Canvas;
+use crate::drawing::CanvasFast as Canvas;
 use crate::opcode::Opcode;
 use spirix::{CircleF4E4, ScalarF4E4};
 use std::collections::HashMap;
@@ -200,6 +200,16 @@ impl VM {
         }
     }
 
+    /// Reset VM state to re-execute bytecode from the beginning
+    ///
+    /// Clears stack, resets instruction pointer, and clears halt flag.
+    /// Preserves context variables (scroll, mouse, time) for reactive re-execution.
+    pub fn reset(&mut self) {
+        self.ip = 0;
+        self.halted = false;
+        self.stack.clear();
+    }
+
     /// Register a function by its BLAKE3 hash
     ///
     /// Content-addressed functions: "If you know the hash, you can call it"
@@ -273,13 +283,7 @@ impl VM {
                 let vsf_value = vsf_parse(&self.bytecode, &mut self.ip)
                     .map_err(|e| format!("push: failed to parse VSF value: {}", e))?;
 
-                // If pushing a colour constant, expand to RGBA components (late binding)
-                // This allows display profiles to be applied at compositor level
-                if self.is_colour_constant(&vsf_value) {
-                    self.expand_colour_to_rgba(vsf_value)?;
-                } else {
-                    self.stack.push(vsf_value);
-                }
+                self.stack.push(vsf_value);
             }
 
             Opcode::pop => {
@@ -331,6 +335,13 @@ impl VM {
                 self.stack.push(result);
             }
 
+            Opcode::mod_ => {
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_mod(lhs, rhs)?;
+                self.stack.push(result);
+            }
+
             Opcode::neg => {
                 let val = self.pop()?;
                 let result = self.execute_neg(val)?;
@@ -351,6 +362,34 @@ impl VM {
                 self.stack.push(result);
             }
 
+            Opcode::ne => {
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_ne(lhs, rhs)?;
+                self.stack.push(result);
+            }
+
+            Opcode::le => {
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_le(lhs, rhs)?;
+                self.stack.push(result);
+            }
+
+            Opcode::gt => {
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_gt(lhs, rhs)?;
+                self.stack.push(result);
+            }
+
+            Opcode::ge => {
+                let rhs = self.pop()?;
+                let lhs = self.pop()?;
+                let result = self.execute_ge(lhs, rhs)?;
+                self.stack.push(result);
+            }
+
             // ==================== CONTROL FLOW (Content-Addressed) ====================
             Opcode::jump => {
                 // Pop hash target and jump to it
@@ -368,57 +407,21 @@ impl VM {
             }
 
             Opcode::jump_if => {
-                // Pop target hash, then condition
+                // Pop target hash, then condition (strict u0 only)
                 let target = self.pop()?;
                 let condition = self.pop()?;
 
-                // Check if condition is truthy (non-zero)
-                let is_truthy = match &condition {
-                    VsfType::s44(v) => !v.is_zero(),
-                    VsfType::u3(v) => *v != 0,
-                    VsfType::u4(v) => *v != 0,
-                    VsfType::u5(v) => *v != 0,
-                    _ => {
+                let should_jump = match condition {
+                    VsfType::u0(v) => v,
+                    other => {
                         return Err(format!(
-                            "jump_if condition must be numeric, got {:?}",
-                            condition
+                            "jump_if requires u0 (bool), got {}",
+                            type_name(&other)
                         ))
                     }
                 };
 
-                if is_truthy {
-                    match target {
-                        VsfType::hb(hash_vec) => {
-                            let hash: [u8; 32] = hash_vec
-                                .try_into()
-                                .map_err(|_| "Jump hash must be 32 bytes")?;
-                            let target_ip = self.resolve_function(&hash)?;
-                            self.ip = target_ip;
-                        }
-                        _ => return Err("Jump requires hb (BLAKE3 hash)".to_string()),
-                    }
-                }
-            }
-
-            Opcode::jump_zero => {
-                // Pop target hash, then condition
-                let target = self.pop()?;
-                let condition = self.pop()?;
-
-                let is_zero = match &condition {
-                    VsfType::s44(v) => v.is_zero(),
-                    VsfType::u3(v) => *v == 0,
-                    VsfType::u4(v) => *v == 0,
-                    VsfType::u5(v) => *v == 0,
-                    _ => {
-                        return Err(format!(
-                            "jump_zero condition must be numeric, got {:?}",
-                            condition
-                        ))
-                    }
-                };
-
-                if is_zero {
+                if should_jump {
                     match target {
                         VsfType::hb(hash_vec) => {
                             let hash: [u8; 32] = hash_vec
@@ -458,13 +461,6 @@ impl VM {
                 }
             }
 
-            Opcode::call_indirect => {
-                // Pop handle (capability-based indirect call)
-                return Err(
-                    "call_indirect not yet implemented (requires capability system)".to_string(),
-                );
-            }
-
             Opcode::return_ => {
                 // Pop call frame and return
                 let frame = self
@@ -502,88 +498,29 @@ impl VM {
                 self.halted = true;
             }
 
-            Opcode::rgba => {
-                // Pop RGBA components and push as 4 separate s44 values
-                // Keeps VSF RGB colour space, no conversion until WASM boundary
-                let alpha = self.pop_s44()?;
-                let blue = self.pop_s44()?;
-                let green = self.pop_s44()?;
-                let red = self.pop_s44()?;
-
-                self.stack.push(VsfType::s44(red));
-                self.stack.push(VsfType::s44(green));
-                self.stack.push(VsfType::s44(blue));
-                self.stack.push(VsfType::s44(alpha));
-            }
-
-            Opcode::rgb => {
-                // Pop RGB components, default alpha=1, push as 4 separate s44 values
-                let blue = self.pop_s44()?;
-                let green = self.pop_s44()?;
-                let red = self.pop_s44()?;
-
-                self.stack.push(VsfType::s44(red));
-                self.stack.push(VsfType::s44(green));
-                self.stack.push(VsfType::s44(blue));
-                self.stack.push(VsfType::s44(ScalarF4E4::ONE));
-            }
-
-            // Logical operators (&&, ||, !) - return 1 or 0 based on truthiness
+            // Bitwise operators (&, |, ^, ~) - work on all numeric types
             Opcode::and => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                let result = if self.is_truthy(&a) && self.is_truthy(&b) {
-                    VsfType::s44(ScalarF4E4::ONE)
-                } else {
-                    VsfType::s44(ScalarF4E4::ZERO)
-                };
-                self.stack.push(result);
-            }
-
-            Opcode::or => {
-                let b = self.pop()?;
-                let a = self.pop()?;
-                let result = if self.is_truthy(&a) || self.is_truthy(&b) {
-                    VsfType::s44(ScalarF4E4::ONE)
-                } else {
-                    VsfType::s44(ScalarF4E4::ZERO)
-                };
-                self.stack.push(result);
-            }
-
-            Opcode::not => {
-                let a = self.pop()?;
-                let result = if self.is_truthy(&a) {
-                    VsfType::s44(ScalarF4E4::ZERO)
-                } else {
-                    VsfType::s44(ScalarF4E4::ONE)
-                };
-                self.stack.push(result);
-            }
-
-            // Bitwise operators (&, |, ^, ~) - operate on bits via Spirix
-            Opcode::bit_and => {
                 let rhs = self.pop()?;
                 let lhs = self.pop()?;
                 let result = self.execute_bitwise_and(lhs, rhs)?;
                 self.stack.push(result);
             }
 
-            Opcode::bit_or => {
+            Opcode::or => {
                 let rhs = self.pop()?;
                 let lhs = self.pop()?;
                 let result = self.execute_bitwise_or(lhs, rhs)?;
                 self.stack.push(result);
             }
 
-            Opcode::bit_xor => {
+            Opcode::xor => {
                 let rhs = self.pop()?;
                 let lhs = self.pop()?;
                 let result = self.execute_bitwise_xor(lhs, rhs)?;
                 self.stack.push(result);
             }
 
-            Opcode::bit_not => {
+            Opcode::not => {
                 let a = self.pop()?;
                 let result = self.execute_bitwise_not(a)?;
                 self.stack.push(result);
@@ -663,6 +600,12 @@ impl VM {
 
             // ==================== LOOM LAYOUT ====================
 
+            Opcode::clear_canvas => {
+                // Pop VSF colour type (rc*, ra, or rw)
+                let colour = self.pop()?;
+                self.canvas.clear(&colour)?;
+            }
+
             Opcode::render_loom => {
                 // Pop scene graph from stack (ro* type)
                 let vsf = self.stack.pop()
@@ -700,6 +643,23 @@ impl VM {
             Opcode::timestamp => {
                 // Push current time (Unix timestamp in seconds)
                 self.stack.push(VsfType::s44(self.time));
+            }
+
+            Opcode::debug_print => {
+                // Pop value and log it for debugging
+                let value = self.pop()?;
+                let debug_str = format!("DEBUG: {:?}", value);
+
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use wasm_bindgen::JsValue;
+                    web_sys::console::log_1(&JsValue::from_str(&debug_str));
+                }
+
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    println!("{}", debug_str);
+                }
             }
 
             _ => {
@@ -748,6 +708,10 @@ impl VM {
         spirix_binop!(lhs, rhs, /, "div")
     }
 
+    fn execute_mod(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        spirix_binop!(lhs, rhs, %, "mod")
+    }
+
     fn execute_neg(&self, val: VsfType) -> Result<VsfType, String> {
         match val {
             VsfType::s33(v) => Ok(VsfType::s33(-v)),
@@ -785,7 +749,7 @@ impl VM {
     }
 
     fn execute_eq(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
-        let result = match (lhs, rhs) {
+        let result = match (&lhs, &rhs) {
             (VsfType::s33(a), VsfType::s33(b)) => a == b,
             (VsfType::s34(a), VsfType::s34(b)) => a == b,
             (VsfType::s35(a), VsfType::s35(b)) => a == b,
@@ -825,13 +789,15 @@ impl VM {
             (VsfType::l(a), VsfType::l(b)) => a == b,
             (VsfType::d(a), VsfType::d(b)) => a == b,
             (VsfType::u0(a), VsfType::u0(b)) => a == b,
-            _ => false,
+            (a, b) => {
+                return Err(format!(
+                    "Type mismatch in eq: {} == {}",
+                    type_name(a),
+                    type_name(b)
+                ))
+            }
         };
-        Ok(VsfType::s44(if result {
-            ScalarF4E4::ONE
-        } else {
-            ScalarF4E4::ZERO
-        }))
+        Ok(VsfType::u0(result))
     }
 
     fn execute_lt(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
@@ -879,70 +845,274 @@ impl VM {
                 ))
             }
         };
-        // Return 1 for true, 0 for false (comparison results are booleans)
-        Ok(VsfType::s44(if result {
-            ScalarF4E4::ONE
-        } else {
-            ScalarF4E4::ZERO
-        }))
+        Ok(VsfType::u0(result))
+    }
+
+    fn execute_ne(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        let result = match (&lhs, &rhs) {
+            (VsfType::s33(a), VsfType::s33(b)) => a != b,
+            (VsfType::s34(a), VsfType::s34(b)) => a != b,
+            (VsfType::s35(a), VsfType::s35(b)) => a != b,
+            (VsfType::s36(a), VsfType::s36(b)) => a != b,
+            (VsfType::s37(a), VsfType::s37(b)) => a != b,
+            (VsfType::s43(a), VsfType::s43(b)) => a != b,
+            (VsfType::s44(a), VsfType::s44(b)) => a != b,
+            (VsfType::s45(a), VsfType::s45(b)) => a != b,
+            (VsfType::s46(a), VsfType::s46(b)) => a != b,
+            (VsfType::s47(a), VsfType::s47(b)) => a != b,
+            (VsfType::s53(a), VsfType::s53(b)) => a != b,
+            (VsfType::s54(a), VsfType::s54(b)) => a != b,
+            (VsfType::s55(a), VsfType::s55(b)) => a != b,
+            (VsfType::s56(a), VsfType::s56(b)) => a != b,
+            (VsfType::s57(a), VsfType::s57(b)) => a != b,
+            (VsfType::s63(a), VsfType::s63(b)) => a != b,
+            (VsfType::s64(a), VsfType::s64(b)) => a != b,
+            (VsfType::s65(a), VsfType::s65(b)) => a != b,
+            (VsfType::s66(a), VsfType::s66(b)) => a != b,
+            (VsfType::s67(a), VsfType::s67(b)) => a != b,
+            (VsfType::s73(a), VsfType::s73(b)) => a != b,
+            (VsfType::s74(a), VsfType::s74(b)) => a != b,
+            (VsfType::s75(a), VsfType::s75(b)) => a != b,
+            (VsfType::s76(a), VsfType::s76(b)) => a != b,
+            (VsfType::s77(a), VsfType::s77(b)) => a != b,
+            (VsfType::u3(a), VsfType::u3(b)) => a != b,
+            (VsfType::u4(a), VsfType::u4(b)) => a != b,
+            (VsfType::u5(a), VsfType::u5(b)) => a != b,
+            (VsfType::u6(a), VsfType::u6(b)) => a != b,
+            (VsfType::u7(a), VsfType::u7(b)) => a != b,
+            (VsfType::i3(a), VsfType::i3(b)) => a != b,
+            (VsfType::i4(a), VsfType::i4(b)) => a != b,
+            (VsfType::i5(a), VsfType::i5(b)) => a != b,
+            (VsfType::i6(a), VsfType::i6(b)) => a != b,
+            (VsfType::i7(a), VsfType::i7(b)) => a != b,
+            (VsfType::x(a), VsfType::x(b)) => a != b,
+            (VsfType::l(a), VsfType::l(b)) => a != b,
+            (VsfType::d(a), VsfType::d(b)) => a != b,
+            (VsfType::u0(a), VsfType::u0(b)) => a != b,
+            (a, b) => {
+                return Err(format!(
+                    "Type mismatch in ne: {} != {}",
+                    type_name(a),
+                    type_name(b)
+                ))
+            }
+        };
+        Ok(VsfType::u0(result))
+    }
+
+    fn execute_le(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        let result = match (lhs, rhs) {
+            (VsfType::s33(a), VsfType::s33(b)) => a <= b,
+            (VsfType::s34(a), VsfType::s34(b)) => a <= b,
+            (VsfType::s35(a), VsfType::s35(b)) => a <= b,
+            (VsfType::s36(a), VsfType::s36(b)) => a <= b,
+            (VsfType::s37(a), VsfType::s37(b)) => a <= b,
+            (VsfType::s43(a), VsfType::s43(b)) => a <= b,
+            (VsfType::s44(a), VsfType::s44(b)) => a <= b,
+            (VsfType::s45(a), VsfType::s45(b)) => a <= b,
+            (VsfType::s46(a), VsfType::s46(b)) => a <= b,
+            (VsfType::s47(a), VsfType::s47(b)) => a <= b,
+            (VsfType::s53(a), VsfType::s53(b)) => a <= b,
+            (VsfType::s54(a), VsfType::s54(b)) => a <= b,
+            (VsfType::s55(a), VsfType::s55(b)) => a <= b,
+            (VsfType::s56(a), VsfType::s56(b)) => a <= b,
+            (VsfType::s57(a), VsfType::s57(b)) => a <= b,
+            (VsfType::s63(a), VsfType::s63(b)) => a <= b,
+            (VsfType::s64(a), VsfType::s64(b)) => a <= b,
+            (VsfType::s65(a), VsfType::s65(b)) => a <= b,
+            (VsfType::s66(a), VsfType::s66(b)) => a <= b,
+            (VsfType::s67(a), VsfType::s67(b)) => a <= b,
+            (VsfType::s73(a), VsfType::s73(b)) => a <= b,
+            (VsfType::s74(a), VsfType::s74(b)) => a <= b,
+            (VsfType::s75(a), VsfType::s75(b)) => a <= b,
+            (VsfType::s76(a), VsfType::s76(b)) => a <= b,
+            (VsfType::s77(a), VsfType::s77(b)) => a <= b,
+            (VsfType::u3(a), VsfType::u3(b)) => a <= b,
+            (VsfType::u4(a), VsfType::u4(b)) => a <= b,
+            (VsfType::u5(a), VsfType::u5(b)) => a <= b,
+            (VsfType::u6(a), VsfType::u6(b)) => a <= b,
+            (VsfType::u7(a), VsfType::u7(b)) => a <= b,
+            (VsfType::i3(a), VsfType::i3(b)) => a <= b,
+            (VsfType::i4(a), VsfType::i4(b)) => a <= b,
+            (VsfType::i5(a), VsfType::i5(b)) => a <= b,
+            (VsfType::i6(a), VsfType::i6(b)) => a <= b,
+            (VsfType::i7(a), VsfType::i7(b)) => a <= b,
+            (a, b) => {
+                return Err(format!(
+                    "Type mismatch in le: {} <= {}",
+                    type_name(&a),
+                    type_name(&b)
+                ))
+            }
+        };
+        Ok(VsfType::u0(result))
+    }
+
+    fn execute_gt(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        let result = match (lhs, rhs) {
+            (VsfType::s33(a), VsfType::s33(b)) => a > b,
+            (VsfType::s34(a), VsfType::s34(b)) => a > b,
+            (VsfType::s35(a), VsfType::s35(b)) => a > b,
+            (VsfType::s36(a), VsfType::s36(b)) => a > b,
+            (VsfType::s37(a), VsfType::s37(b)) => a > b,
+            (VsfType::s43(a), VsfType::s43(b)) => a > b,
+            (VsfType::s44(a), VsfType::s44(b)) => a > b,
+            (VsfType::s45(a), VsfType::s45(b)) => a > b,
+            (VsfType::s46(a), VsfType::s46(b)) => a > b,
+            (VsfType::s47(a), VsfType::s47(b)) => a > b,
+            (VsfType::s53(a), VsfType::s53(b)) => a > b,
+            (VsfType::s54(a), VsfType::s54(b)) => a > b,
+            (VsfType::s55(a), VsfType::s55(b)) => a > b,
+            (VsfType::s56(a), VsfType::s56(b)) => a > b,
+            (VsfType::s57(a), VsfType::s57(b)) => a > b,
+            (VsfType::s63(a), VsfType::s63(b)) => a > b,
+            (VsfType::s64(a), VsfType::s64(b)) => a > b,
+            (VsfType::s65(a), VsfType::s65(b)) => a > b,
+            (VsfType::s66(a), VsfType::s66(b)) => a > b,
+            (VsfType::s67(a), VsfType::s67(b)) => a > b,
+            (VsfType::s73(a), VsfType::s73(b)) => a > b,
+            (VsfType::s74(a), VsfType::s74(b)) => a > b,
+            (VsfType::s75(a), VsfType::s75(b)) => a > b,
+            (VsfType::s76(a), VsfType::s76(b)) => a > b,
+            (VsfType::s77(a), VsfType::s77(b)) => a > b,
+            (VsfType::u3(a), VsfType::u3(b)) => a > b,
+            (VsfType::u4(a), VsfType::u4(b)) => a > b,
+            (VsfType::u5(a), VsfType::u5(b)) => a > b,
+            (VsfType::u6(a), VsfType::u6(b)) => a > b,
+            (VsfType::u7(a), VsfType::u7(b)) => a > b,
+            (VsfType::i3(a), VsfType::i3(b)) => a > b,
+            (VsfType::i4(a), VsfType::i4(b)) => a > b,
+            (VsfType::i5(a), VsfType::i5(b)) => a > b,
+            (VsfType::i6(a), VsfType::i6(b)) => a > b,
+            (VsfType::i7(a), VsfType::i7(b)) => a > b,
+            (a, b) => {
+                return Err(format!(
+                    "Type mismatch in gt: {} > {}",
+                    type_name(&a),
+                    type_name(&b)
+                ))
+            }
+        };
+        Ok(VsfType::u0(result))
+    }
+
+    fn execute_ge(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
+        let result = match (lhs, rhs) {
+            (VsfType::s33(a), VsfType::s33(b)) => a >= b,
+            (VsfType::s34(a), VsfType::s34(b)) => a >= b,
+            (VsfType::s35(a), VsfType::s35(b)) => a >= b,
+            (VsfType::s36(a), VsfType::s36(b)) => a >= b,
+            (VsfType::s37(a), VsfType::s37(b)) => a >= b,
+            (VsfType::s43(a), VsfType::s43(b)) => a >= b,
+            (VsfType::s44(a), VsfType::s44(b)) => a >= b,
+            (VsfType::s45(a), VsfType::s45(b)) => a >= b,
+            (VsfType::s46(a), VsfType::s46(b)) => a >= b,
+            (VsfType::s47(a), VsfType::s47(b)) => a >= b,
+            (VsfType::s53(a), VsfType::s53(b)) => a >= b,
+            (VsfType::s54(a), VsfType::s54(b)) => a >= b,
+            (VsfType::s55(a), VsfType::s55(b)) => a >= b,
+            (VsfType::s56(a), VsfType::s56(b)) => a >= b,
+            (VsfType::s57(a), VsfType::s57(b)) => a >= b,
+            (VsfType::s63(a), VsfType::s63(b)) => a >= b,
+            (VsfType::s64(a), VsfType::s64(b)) => a >= b,
+            (VsfType::s65(a), VsfType::s65(b)) => a >= b,
+            (VsfType::s66(a), VsfType::s66(b)) => a >= b,
+            (VsfType::s67(a), VsfType::s67(b)) => a >= b,
+            (VsfType::s73(a), VsfType::s73(b)) => a >= b,
+            (VsfType::s74(a), VsfType::s74(b)) => a >= b,
+            (VsfType::s75(a), VsfType::s75(b)) => a >= b,
+            (VsfType::s76(a), VsfType::s76(b)) => a >= b,
+            (VsfType::s77(a), VsfType::s77(b)) => a >= b,
+            (VsfType::u3(a), VsfType::u3(b)) => a >= b,
+            (VsfType::u4(a), VsfType::u4(b)) => a >= b,
+            (VsfType::u5(a), VsfType::u5(b)) => a >= b,
+            (VsfType::u6(a), VsfType::u6(b)) => a >= b,
+            (VsfType::u7(a), VsfType::u7(b)) => a >= b,
+            (VsfType::i3(a), VsfType::i3(b)) => a >= b,
+            (VsfType::i4(a), VsfType::i4(b)) => a >= b,
+            (VsfType::i5(a), VsfType::i5(b)) => a >= b,
+            (VsfType::i6(a), VsfType::i6(b)) => a >= b,
+            (VsfType::i7(a), VsfType::i7(b)) => a >= b,
+            (a, b) => {
+                return Err(format!(
+                    "Type mismatch in ge: {} >= {}",
+                    type_name(&a),
+                    type_name(&b)
+                ))
+            }
+        };
+        Ok(VsfType::u0(result))
     }
 
     fn execute_bitwise_and(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
-        match (lhs, rhs) {
-            (VsfType::s44(a), VsfType::s44(b)) => Ok(VsfType::s44(a & b)),
-            (a, b) => Err(format!(
-                "Type mismatch in bitwise AND: {} & {}",
-                type_name(&a),
-                type_name(&b)
-            )),
-        }
+        spirix_binop!(lhs, rhs, &, "bitwise AND")
     }
 
     fn execute_bitwise_or(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
-        match (lhs, rhs) {
-            (VsfType::s44(a), VsfType::s44(b)) => Ok(VsfType::s44(a | b)),
-            (a, b) => Err(format!(
-                "Type mismatch in bitwise OR: {} | {}",
-                type_name(&a),
-                type_name(&b)
-            )),
-        }
+        spirix_binop!(lhs, rhs, |, "bitwise OR")
     }
 
     fn execute_bitwise_xor(&self, lhs: VsfType, rhs: VsfType) -> Result<VsfType, String> {
-        match (lhs, rhs) {
-            (VsfType::s44(a), VsfType::s44(b)) => Ok(VsfType::s44(a ^ b)),
-            (a, b) => Err(format!(
-                "Type mismatch in bitwise XOR: {} ^ {}",
-                type_name(&a),
-                type_name(&b)
-            )),
-        }
+        spirix_binop!(lhs, rhs, ^, "bitwise XOR")
     }
 
     fn execute_bitwise_not(&self, val: VsfType) -> Result<VsfType, String> {
         match val {
+            // ========== SCALARS (25 types) ==========
+            VsfType::s33(a) => Ok(VsfType::s33(!a)),
+            VsfType::s34(a) => Ok(VsfType::s34(!a)),
+            VsfType::s35(a) => Ok(VsfType::s35(!a)),
+            VsfType::s36(a) => Ok(VsfType::s36(!a)),
+            VsfType::s37(a) => Ok(VsfType::s37(!a)),
+            VsfType::s43(a) => Ok(VsfType::s43(!a)),
             VsfType::s44(a) => Ok(VsfType::s44(!a)),
-            other => Err(format!("Cannot bitwise NOT type: {}", type_name(&other))),
-        }
-    }
+            VsfType::s45(a) => Ok(VsfType::s45(!a)),
+            VsfType::s46(a) => Ok(VsfType::s46(!a)),
+            VsfType::s47(a) => Ok(VsfType::s47(!a)),
+            VsfType::s53(a) => Ok(VsfType::s53(!a)),
+            VsfType::s54(a) => Ok(VsfType::s54(!a)),
+            VsfType::s55(a) => Ok(VsfType::s55(!a)),
+            VsfType::s56(a) => Ok(VsfType::s56(!a)),
+            VsfType::s57(a) => Ok(VsfType::s57(!a)),
+            VsfType::s63(a) => Ok(VsfType::s63(!a)),
+            VsfType::s64(a) => Ok(VsfType::s64(!a)),
+            VsfType::s65(a) => Ok(VsfType::s65(!a)),
+            VsfType::s66(a) => Ok(VsfType::s66(!a)),
+            VsfType::s67(a) => Ok(VsfType::s67(!a)),
+            VsfType::s73(a) => Ok(VsfType::s73(!a)),
+            VsfType::s74(a) => Ok(VsfType::s74(!a)),
+            VsfType::s75(a) => Ok(VsfType::s75(!a)),
+            VsfType::s76(a) => Ok(VsfType::s76(!a)),
+            VsfType::s77(a) => Ok(VsfType::s77(!a)),
 
-    /// Check if a value is "truthy" for logical operations
-    /// Numbers: non-zero = true, zero = false
-    fn is_truthy(&self, val: &VsfType) -> bool {
-        match val {
-            VsfType::s44(v) => !v.is_zero(),
-            VsfType::u3(v) => *v != 0,
-            VsfType::u4(v) => *v != 0,
-            VsfType::u5(v) => *v != 0,
-            VsfType::u6(v) => *v != 0,
-            VsfType::u7(v) => *v != 0,
-            VsfType::i3(v) => *v != 0,
-            VsfType::i4(v) => *v != 0,
-            VsfType::i5(v) => *v != 0,
-            VsfType::i6(v) => *v != 0,
-            VsfType::i7(v) => *v != 0,
-            _ => true, // Other types (strings, arrays, etc) default to true
+            // ========== CIRCLES (25 types) ==========
+            VsfType::c33(a) => Ok(VsfType::c33(!a)),
+            VsfType::c34(a) => Ok(VsfType::c34(!a)),
+            VsfType::c35(a) => Ok(VsfType::c35(!a)),
+            VsfType::c36(a) => Ok(VsfType::c36(!a)),
+            VsfType::c37(a) => Ok(VsfType::c37(!a)),
+            VsfType::c43(a) => Ok(VsfType::c43(!a)),
+            VsfType::c44(a) => Ok(VsfType::c44(!a)),
+            VsfType::c45(a) => Ok(VsfType::c45(!a)),
+            VsfType::c46(a) => Ok(VsfType::c46(!a)),
+            VsfType::c47(a) => Ok(VsfType::c47(!a)),
+            VsfType::c53(a) => Ok(VsfType::c53(!a)),
+            VsfType::c54(a) => Ok(VsfType::c54(!a)),
+            VsfType::c55(a) => Ok(VsfType::c55(!a)),
+            VsfType::c56(a) => Ok(VsfType::c56(!a)),
+            VsfType::c57(a) => Ok(VsfType::c57(!a)),
+            VsfType::c63(a) => Ok(VsfType::c63(!a)),
+            VsfType::c64(a) => Ok(VsfType::c64(!a)),
+            VsfType::c65(a) => Ok(VsfType::c65(!a)),
+            VsfType::c66(a) => Ok(VsfType::c66(!a)),
+            VsfType::c67(a) => Ok(VsfType::c67(!a)),
+            VsfType::c73(a) => Ok(VsfType::c73(!a)),
+            VsfType::c74(a) => Ok(VsfType::c74(!a)),
+            VsfType::c75(a) => Ok(VsfType::c75(!a)),
+            VsfType::c76(a) => Ok(VsfType::c76(!a)),
+            VsfType::c77(a) => Ok(VsfType::c77(!a)),
+
+            other => Err(format!("Cannot bitwise NOT type: {}", type_name(&other))),
         }
     }
 
@@ -967,96 +1137,8 @@ impl VM {
         }
     }
 
-    #[allow(dead_code)]
     fn push_c44(&mut self, circle: CircleF4E4) {
         self.stack.push(VsfType::c44(circle));
-    }
-
-    /// Convert VsfType to F4E4 RGBA components
-    /// Handles u5 packed colours, VSF colour constants, and other integer types
-    #[allow(dead_code)]
-    fn vsf_to_rgba(
-        &self,
-        v: VsfType,
-    ) -> Result<(ScalarF4E4, ScalarF4E4, ScalarF4E4, ScalarF4E4), String> {
-        let u32_val = match v {
-            VsfType::u5(val) => val,
-            VsfType::u3(val) => val as u32,
-            VsfType::u4(val) => val as u32,
-            VsfType::rck => 0xFF000000, // Black
-            VsfType::rcw => 0xFFFFFFFF, // White
-            VsfType::rcr => 0xFFFF0000, // Red
-            VsfType::rcn => 0xFF00FF00, // Green
-            VsfType::rcb => 0xFF0000FF, // Blue
-            VsfType::rcc => 0xFF00FFFF, // Cyan
-            VsfType::rcj => 0xFFFF00FF, // Magenta
-            VsfType::rcy => 0xFFFFFF00, // Yellow
-            VsfType::rcg => 0xFF808080, // Gray
-            VsfType::rco => 0xFFFF8000, // Orange
-            VsfType::rcv => 0xFF8000FF, // Violet
-            VsfType::rcl => 0xFF00FF00, // Lime (duplicate of green)
-            VsfType::rcq => 0xFF00FFFF, // Aqua (duplicate of cyan)
-            other => {
-                return Err(format!(
-                    "Cannot convert {} to RGBA colour",
-                    type_name(&other)
-                ))
-            }
-        };
-
-        // Unpack AARRGGBB to F4E4 RGBA components (0.0-1.0) using Spirix
-        let a = ScalarF4E4::from((u32_val >> 24) as u8) >> 8;
-        let r = ScalarF4E4::from((u32_val >> 16) as u8) >> 8;
-        let g = ScalarF4E4::from((u32_val >> 8) as u8) >> 8;
-        let b = ScalarF4E4::from(u32_val as u8) >> 8;
-
-        Ok((r, g, b, a))
-    }
-
-    /// Check if VsfType is a colour constant that should be expanded to RGBA
-    fn is_colour_constant(&self, v: &VsfType) -> bool {
-        matches!(
-            v,
-            VsfType::rck | // Black
-            VsfType::rcw | // White
-            VsfType::rcr | // Red
-            VsfType::rcn | // Green
-            VsfType::rcb | // Blue
-            VsfType::rcc | // Cyan
-            VsfType::rcj | // Magenta
-            VsfType::rcy | // Yellow
-            VsfType::rcg | // Gray
-            VsfType::rco | // Orange
-            VsfType::rcv | // Violet
-            VsfType::rcl | // Lime
-            VsfType::rcq   // Aqua
-        )
-    }
-
-    /// Expand colour constant to RGBA components on stack (late binding)
-    /// Converts from VSF RGB colour space to S44 RGBA components
-    /// Display profiles are applied later at compositor level
-    fn expand_colour_to_rgba(&mut self, colour: VsfType) -> Result<(), String> {
-        use vsf::colour::convert::RgbaLinear;
-
-        // Convert colour constant to linear RGBA
-        let rgba: RgbaLinear = colour
-            .to_rgba_linear()
-            .ok_or_else(|| format!("Colour type cannot be converted to RGBA: {:?}", colour))?;
-
-        // Convert to Spirix S44 and apply gamma 2 encoding (sqrt for display)
-        let r = ScalarF4E4::from(rgba.r).max(0).sqrt();
-        let g = ScalarF4E4::from(rgba.g).max(0).sqrt();
-        let b = ScalarF4E4::from(rgba.b).max(0).sqrt();
-        let a = ScalarF4E4::from(rgba.a).max(0).sqrt();
-
-        // Push RGBA components in reverse order (drawing opcodes pop r,g,b,a so we push a,b,g,r)
-        self.stack.push(VsfType::s44(a));
-        self.stack.push(VsfType::s44(b));
-        self.stack.push(VsfType::s44(g));
-        self.stack.push(VsfType::s44(r));
-
-        Ok(())
     }
 
     /// Peek at top of stack without popping
@@ -1174,8 +1256,8 @@ impl VM {
             .as_ref()
             .ok_or("No scene to render")?;
 
-        // Clear canvas to black (opaque black = 0xFF000000)
-        self.canvas.clear(0xFF000000);
+        // Clear canvas to black
+        self.canvas.clear(&VsfType::rck)?;
 
         // Re-render scene using renderer
         let mut renderer = crate::renderer::RenderContext::new();

@@ -108,7 +108,7 @@ pub struct Capsule {
 impl Capsule {
     /// Load a capsule from VSF bytes
     pub fn load(data: &[u8]) -> Result<Self, String> {
-        use vsf::file_format::{VsfHeader, VsfSection};
+        use vsf::file_format::VsfHeader;
         use vsf::types::VsfType;
 
         // Parse header

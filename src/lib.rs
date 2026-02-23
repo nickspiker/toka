@@ -78,9 +78,6 @@ pub mod opcode;
 /// VM execution engine
 pub mod vm;
 
-/// Canvas rendering backend
-pub mod canvas;
-
 /// Bytecode builder with chainable opcode methods
 pub mod builder;
 
@@ -89,9 +86,6 @@ pub mod renderer;
 
 /// Capsule: signed executable bundle
 pub mod capsule;
-
-/// VSF bytecode parser
-pub mod bytecode;
 
 /// Drawing primitives (line, path, etc.)
 pub mod drawing;
@@ -171,13 +165,20 @@ pub mod wasm {
             Ok(!self.vm.is_halted())
         }
 
+        /// Reset VM to re-execute bytecode from beginning
+        ///
+        /// Clears stack, resets instruction pointer, clears halt flag.
+        /// Preserves context variables (scroll, mouse, time) for reactive scenes.
+        pub fn reset(&mut self) {
+            self.vm.reset();
+        }
+
         /// Get canvas pixels as RGBA byte array for ImageData
         ///
         /// Returns Vec<u8> with format [R, G, B, A, R, G, B, A, ...]
         /// suitable for `new ImageData(new Uint8ClampedArray(bytes), width, height)`
-        /// Zero-cost transmute from internal u32 buffer
         pub fn get_canvas_rgba(&self) -> Vec<u8> {
-            self.vm.canvas().to_rgba_bytes().to_vec()
+            self.vm.canvas().to_rgba_bytes()
         }
 
         /// Get canvas width in pixels
@@ -291,7 +292,7 @@ pub mod wasm {
         /// - Ok(()) if resize succeeded
         /// - Err(String) if no scene graph exists or rendering failed
         pub fn resize(&mut self, width: usize, height: usize) -> Result<(), String> {
-            use crate::canvas::Canvas;
+            use crate::drawing::CanvasFast as Canvas;
 
             // Save scene VSF and zoom level
             let scene = self.vm.scene_vsf().cloned();
@@ -357,9 +358,9 @@ pub mod wasm {
         Ok(capsule.provenance_hex())
     }
 
-    /// Inspect a VSF capsule and return formatted output (vsfinfo style, no ANSI colors)
+    /// Inspect a VSF capsule and return formatted output (vsfinfo style, no ANSI colours)
     ///
-    /// Returns the same inspector view as vsfinfo, but without ANSI color codes
+    /// Returns the same inspector view as vsfinfo, but without ANSI colour codes
     /// so it displays properly in browser console.
     #[wasm_bindgen]
     pub fn inspect_capsule(capsule_data: Vec<u8>) -> Result<String, String> {
@@ -375,13 +376,11 @@ pub mod wasm {
     #[wasm_bindgen]
     pub fn generate_fill_red_bytecode() -> Vec<u8> {
         use crate::builder::Program;
+        use vsf::types::VsfType;
         // Simple test bytecode - immediate mode drawing removed
         Program::new()
-            .ps_s44(1) // r = 1.0
-            .ps_s44(0) // g = 0.0
-            .ps_s44(0) // b = 0.0
-            .ps_s44(1) // a = 1.0
-            .ca() // build RGBA colour components
+            .ps(&VsfType::rcr.flatten()) // Push red colour constant
+            .cr() // Clear canvas to red
             .hl() // halt
             .build()
     }

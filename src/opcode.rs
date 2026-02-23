@@ -183,35 +183,22 @@ pub enum Opcode {
     /// VSF: {ge}
     ge,
 
-    // ==================== LOGIC (Logical/Boolean) ====================
-    /// Logical AND: pop b, a; push 1 if both truthy else 0
+    // ==================== BITWISE (Works on all numeric types) ====================
+    /// Bitwise AND: pop b, a; push a & b (all Spirix numeric types)
     /// VSF: {an}
     and,
 
-    /// Logical OR: pop b, a; push 1 if either truthy else 0
+    /// Bitwise OR: pop b, a; push a | b (all Spirix numeric types)
     /// VSF: {or}
     or,
 
-    /// Logical NOT: pop a; push 1 if falsy else 0
+    /// Bitwise XOR: pop b, a; push a ^ b (all Spirix numeric types)
+    /// VSF: {xr}
+    xor,
+
+    /// Bitwise NOT: pop a; push ~a (all Spirix numeric types)
     /// VSF: {nt}
     not,
-
-    // ==================== BITWISE ====================
-    /// Bitwise AND: pop b, a; push a & b (bit-level AND)
-    /// VSF: {ba}
-    bit_and,
-
-    /// Bitwise OR: pop b, a; push a | b (bit-level OR)
-    /// VSF: {bo}
-    bit_or,
-
-    /// Bitwise XOR: pop b, a; push a ^ b (bit-level XOR)
-    /// VSF: {bx}
-    bit_xor,
-
-    /// Bitwise NOT: pop a; push ~a (bit-level complement)
-    /// VSF: {bn}
-    bit_not,
 
     // ==================== TYPE SYSTEM ====================
     /// Pop value; push type identifier as string (d-type)
@@ -303,27 +290,18 @@ pub enum Opcode {
     build_transform,
 
     // ==================== LOOM LAYOUT ====================
+    /// Pop VSF colour; clear canvas
+    /// VSF: {cr}
+    clear_canvas,
+
     /// Pop layout_node; render to canvas
     /// VSF: {rl}
     render_loom,
-
-    // ==================== COLOUR UTILITIES ====================
-    /// Pop a, b, g, r (S44 0.0-1.0); push u32 RGBA
-    /// VSF: {ca}
-    rgba,
-
-    /// Pop b, g, r (S44 0.0-1.0); push u32 RGBA (alpha=1.0)
-    /// VSF: {cb}
-    rgb,
 
     // ==================== CONTROL FLOW ====================
     /// Call function at bytecode offset
     /// VSF: {cn}[offset:u]
     call,
-
-    /// Pop function_handle; call it
-    /// VSF: {cd}
-    call_indirect,
 
     /// Return from function (no value)
     /// VSF: {re}
@@ -340,10 +318,6 @@ pub enum Opcode {
     /// Pop condition; jump if non-zero
     /// VSF: {ji}[offset:u]
     jump_if,
-
-    /// Pop condition; jump if zero
-    /// VSF: {jz}[offset:u]
-    jump_zero,
 
     // ==================== RANDOM NUMBERS ====================
     /// Push random S44 in [-1.0, 1.0]
@@ -472,9 +446,10 @@ impl Opcode {
             0x6774 => Some(Self::gt), // gt
             0x6765 => Some(Self::ge), // ge
 
-            // Logic
+            // Bitwise (works on all numeric types)
             0x616e => Some(Self::and), // an
             0x6f72 => Some(Self::or),  // or
+            0x7872 => Some(Self::xor), // xr
             0x6e74 => Some(Self::not), // nt
 
             // Type system
@@ -509,20 +484,15 @@ impl Opcode {
             0x6b74 => Some(Self::build_transform), // kt
 
             // Loom layout
+            0x6372 => Some(Self::clear_canvas),  // cr
             0x726c => Some(Self::render_loom),   // rl
-
-            // Colour utilities
-            0x6361 => Some(Self::rgba), // ca
-            0x6362 => Some(Self::rgb),  // cb
 
             // Control flow
             0x636e => Some(Self::call),          // cn
-            0x6364 => Some(Self::call_indirect), // cd
             0x7265 => Some(Self::return_),       // re
             0x7276 => Some(Self::return_value),  // rv
             0x6a6d => Some(Self::jump),          // jm
             0x6a69 => Some(Self::jump_if),       // ji
-            0x6a7a => Some(Self::jump_zero),     // jz
 
             // Random numbers
             0x7264 => Some(Self::random),       // rd
@@ -625,11 +595,8 @@ impl Opcode {
             Self::ge => *b"ge",
             Self::and => *b"an",
             Self::or => *b"or",
+            Self::xor => *b"xr",
             Self::not => *b"nt",
-            Self::bit_and => *b"ba",
-            Self::bit_or => *b"bo",
-            Self::bit_xor => *b"bx",
-            Self::bit_not => *b"bn",
             Self::typeof_ => *b"ty",
             Self::to_s44 => *b"ts",
             Self::to_u32 => *b"tu",
@@ -651,16 +618,13 @@ impl Opcode {
             Self::build_roc => *b"kc",
             Self::build_row => *b"kw",
             Self::build_transform => *b"kt",
+            Self::clear_canvas => *b"cr",
             Self::render_loom => *b"rl",
-            Self::rgba => *b"ca",
-            Self::rgb => *b"cb",
             Self::call => *b"cn",
-            Self::call_indirect => *b"cd",
             Self::return_ => *b"re",
             Self::return_value => *b"rv",
             Self::jump => *b"jm",
             Self::jump_if => *b"ji",
-            Self::jump_zero => *b"jz",
             Self::random => *b"rd",
             Self::random_gauss => *b"rg",
             Self::random_range => *b"rr",

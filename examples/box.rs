@@ -6,42 +6,50 @@
 use spirix::{CircleF4E4, ScalarF4E4};
 use toka::builder::Program;
 use toka::capsule::CapsuleBuilder;
-use vsf::types::{Fill, Transform, VsfType};
+use vsf::types::{Fill, VsfType};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Blue circle child (centered at origin, radius 0.3)
+    // Blue circle (standalone, renders first = behind)
     let blue_circle = VsfType::roc(
-        CircleF4E4::from((0, 0)),              // center
-        ScalarF4E4::from(0.3),                     // radius
-        Fill::Solid(Box::new(VsfType::rcb)),       // blue fill
-        None,                                       // no stroke
+        CircleF4E4::from((0, 0)),            // center
+        ScalarF4E4::from(0.3),               // radius
+        Fill::Solid(Box::new(VsfType::rcb)), // blue fill
+        None,                                // no stroke
     );
 
-    // Red box parent (centered, fullscreen)
+    // Red box (no children, renders second = on top)
     let red_box = VsfType::rob(
-        CircleF4E4::from((0, 0)),              // pos (center)
-        CircleF4E4::from((1, 1)),              // size (2x2 in RU)
-        Fill::Solid(Box::new(VsfType::rcr)),       // red fill
-        None,                                       // no stroke
-        vec![blue_circle],                          // child circle
+        CircleF4E4::from((0, 0)), // pos (center)
+        CircleF4E4::from((1, 1)), // size (2x2 in RU)
+        Fill::Solid(Box::new(VsfType::ra([255, 0, 0, 127]))),
+        None,   // no stroke
+        vec![], // no children
     );
 
-    // Transform group: translate (0.1, 0.1) and rotate 0.5 radians
-    let transformed = VsfType::row(
-        Transform {
-            translate: Some(CircleF4E4::from((0.1, 0.1))),
-            rotate: Some(ScalarF4E4::from(0.5)),
-            scale: None,
-            origin: None,
-        },
-        vec![red_box],
+    // Both as siblings - circle first = renders behind red box
+    let children_node = VsfType::ron(
+        CircleF4E4::from((0, 0)),   // pos (unused for container)
+        CircleF4E4::from((0, 0)),   // size (unused for container)
+        vec![blue_circle, red_box], // circle behind, box on top
     );
 
-    // Build Toka bytecode that pushes the scene graph and renders it
+    // Reactive bytecode: builds transform from scroll_y at runtime
     let bytecode = Program::new()
-        .ps(&transformed.flatten())  // Push ro* scene graph
-        .rl()                         // render_loom
-        .hl()                         // halt
+        // Clear canvas to black (VSF RGB colour space)
+        .ps(&VsfType::rck.flatten()) // Black (VSF RGB shortcut)
+        .cr() // Clear canvas
+        // Push translate (static)
+        .ps_c44(0.1, 0.1)
+        // Push rotate (from scroll wheel)
+        .sy() // scroll_y context variable
+        .ps_s44(0.001) // Scale factor
+        .ml() // rotation = scroll_y * 0.001
+        // Push children (ron node)
+        .ps(&children_node.flatten())
+        // Build row from stack and render
+        .kw() // Build row from stack
+        .rl() // Render
+        .hl() // Halt
         .build();
 
     // Wrap in VSF capsule format
@@ -52,9 +60,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(output_path, &capsule)?;
 
     println!("✓ Created {} ({} bytes)", output_path, capsule.len());
-    println!("  Scene graph: row → rob → roc");
+    println!("  Scene graph: row → ron → [roc, rob]");
     println!("  Transform: translate + rotate");
-    println!("  Shapes: red box (1 blue circle child)");
+    println!("  Shapes: blue circle (behind) + red box (on top)");
 
     Ok(())
 }
