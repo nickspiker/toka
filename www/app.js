@@ -54,6 +54,8 @@ async function init() {
         TokaVM = module.TokaVM;
         wasmModule = module;
 
+        // Pipeline label will be updated after VM is created
+
         setStatus('WASM module loaded successfully');
         log('Ready to run programs', 'info');
 
@@ -98,8 +100,6 @@ function render() {
         const rgba = currentVM.get_canvas_rgba();
         const width = currentVM.width();
         const height = currentVM.height();
-        const mid = (Math.floor(height/2) * width + Math.floor(width/2)) * 4;
-        log(`[DBG] centre px bytes: ${[...rgba.slice(mid,mid+4)].map(v=>v.toString(16).padStart(2,'0').toUpperCase()).join(' ')}`, 'info');
 
         const imageData = new ImageData(
             new Uint8ClampedArray(rgba),
@@ -266,6 +266,8 @@ function reactiveRender() {
 
     currentVM = createVM(currentBytecode);
     if (currentVM) {
+        const label = document.getElementById('pipelineLabel');
+        if (label) label.textContent = `pipeline: ${currentVM.pipeline_name()}`;
         try {
             log('Running VM...', 'info');
             const result = currentVM.run(1000);  // Execute up to 1000 instructions
@@ -318,6 +320,23 @@ function setupHandleInput() {
     handleField.focus();
     log('Handle input setup complete', 'info');
 }
+
+// Toggle between fast and quality pipeline
+function togglePipeline() {
+    if (!currentVM) return;
+    const current = currentVM.pipeline_name();
+    const next = current === 'fast' ? 'quality' : 'fast';
+    try {
+        currentVM.set_pipeline(next);
+        const label = document.getElementById('pipelineLabel');
+        if (label) label.textContent = `pipeline: ${currentVM.pipeline_name()}`;
+        render();
+        log(`Switched to ${next} pipeline`, 'info');
+    } catch (err) {
+        log(`Pipeline switch error: ${err}`, 'error');
+    }
+}
+window.togglePipeline = togglePipeline;
 
 // Main entry point
 async function main() {

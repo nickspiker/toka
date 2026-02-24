@@ -25,7 +25,7 @@ impl CanvasFast {
         for row in y1..y2 {
             for col in x1..x2 {
                 let idx = row * self.coords.width + col;
-                self.pixels[idx] = Self::blend(colour, self.pixels[idx]);
+                self.pixels[idx] = Self::blend(colour, self.pixels[idx], (colour & 0xFF) as u8);
             }
         }
     }
@@ -39,158 +39,75 @@ impl CanvasFast {
         colour: u32,
     ) {
         let center = self.coords.half_dims + pos * self.coords.span * self.coords.ru;
-        let scale: CircleF4E4 = (size * self.coords.span * self.coords.ru) >> 1;
+        let half: CircleF4E4 = (size * self.coords.span * self.coords.ru) >> 1;
 
-        if angle.magnitude().is_zero() {
-            self.fill_rotated_rect_axis_aligned(center, scale, colour);
-        } else {
-            self.fill_rotated_rect_decomposed(center, scale, angle, colour);
-        }
+        self.fill_rect_aa(center, half, angle, colour);
     }
 
-    fn fill_rotated_rect_axis_aligned(
+    /// Fill a rectangle using signed distance field — handles all rotations and aspect ratios.
+    ///
+    /// Iterates the AABB of the rotated rect. For each pixel, transforms into rect-local
+    /// space and computes SDF. Coverage is clamped to [0,1] for sub-pixel AA on all edges.
+    fn fill_rect_aa(
         &mut self,
         center: CircleF4E4,
-        half_extents: CircleF4E4,
-        colour: u32,
-    ) {
-        let x1 = (center.r() - half_extents.r()).to_isize().clamp(0, self.coords.width as isize) as usize;
-        let x2 = (center.r() + half_extents.r()).to_isize().clamp(0, self.coords.width as isize) as usize;
-        let y1 = (center.i() - half_extents.i()).to_isize().clamp(0, self.coords.height as isize) as usize;
-        let y2 = (center.i() + half_extents.i()).to_isize().clamp(0, self.coords.height as isize) as usize;
-
-        for y in y1..y2 {
-            for x in x1..x2 {
-                let idx = y * self.coords.width + x;
-                if idx < self.pixels.len() {
-                    self.pixels[idx] = Self::blend(colour, self.pixels[idx]);
-                }
-            }
-        }
-    }
-
-    fn fill_rotated_rect_decomposed(
-        &mut self,
-        center: CircleF4E4,
-        half_extents: CircleF4E4,
+        half: CircleF4E4,
         angle: ScalarF4E4,
         colour: u32,
     ) {
-        let rot = CircleF4E4::from((angle.cos(), angle.sin()));
+        let cos = angle.cos();
+        let sin = angle.sin();
 
-        let c0 = center + CircleF4E4::from((-half_extents.r(), -half_extents.i())) * rot;
-        let c1 = center + CircleF4E4::from((half_extents.r(), -half_extents.i())) * rot;
-        let c2 = center + CircleF4E4::from((half_extents.r(), half_extents.i())) * rot;
-        let c3 = center + CircleF4E4::from((-half_extents.r(), half_extents.i())) * rot;
+        let hw = half.r();
+        let hh = half.i();
 
-        let mut corners_with_angles = [
-            (c0, (c0 - center).i().atan2((c0 - center).r())),
-            (c1, (c1 - center).i().atan2((c1 - center).r())),
-            (c2, (c2 - center).i().atan2((c2 - center).r())),
-            (c3, (c3 - center).i().atan2((c3 - center).r())),
-        ];
-        corners_with_angles.sort_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap());
+        // AABB of the rotated rect — clamped to canvas
+        let aabb_half_w = (hw * cos.magnitude() + hh * sin.magnitude()).ceil();
+        let aabb_half_h = (hw * sin.magnitude() + hh * cos.magnitude()).ceil();
 
-        let right  = corners_with_angles[0].0;
-        let top    = corners_with_angles[1].0;
-        let left   = corners_with_angles[2].0;
-        let bottom = corners_with_angles[3].0;
+        let cx = center.r();
+        let cy = center.i();
 
-        let mut x_sorted = [c0.r(), c1.r(), c2.r(), c3.r()];
-        x_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        let mut y_sorted = [c0.i(), c1.i(), c2.i(), c3.i()];
-        y_sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let x0 = (cx - aabb_half_w)
+            .to_isize()
+            .clamp(0, self.coords.width as isize);
+        let x1 = (cx + aabb_half_w)
+            .to_isize()
+            .clamp(0, self.coords.width as isize);
+        let y0 = (cy - aabb_half_h)
+            .to_isize()
+            .clamp(0, self.coords.height as isize);
+        let y1 = (cy + aabb_half_h)
+            .to_isize()
+            .clamp(0, self.coords.height as isize);
 
-        let tl = CircleF4E4::from((x_sorted[1], y_sorted[2]));
-        let br = CircleF4E4::from((x_sorted[2], y_sorted[1]));
+        for py in y0..y1 {
+            for px in x0..x1 {
+                // Translate to rect-center-relative
+                let dx = px - cx;
+                let dy = py - cy;
 
-        self.fill_rect_axis_aligned_abs(tl, br, colour);
-        self.scan_left(right, top, br.r(), colour);
-        self.scan_down(top, left, tl.i(), colour);
-        self.scan_right(left, bottom, tl.r(), colour);
-        self.scan_up(bottom, right, br.i(), colour);
-    }
+                // Rotate into rect-local space (inverse rotation = transpose)
+                let lx = dx * cos + dy * sin;
+                let ly = dy * cos - dx * sin;
 
-    fn fill_rect_axis_aligned_abs(&mut self, top_left: CircleF4E4, bottom_right: CircleF4E4, colour: u32) {
-        let x_start = top_left.r().to_isize().max(0);
-        let x_end   = bottom_right.r().to_isize().min(self.coords.width as isize);
-        let y_start = top_left.i().to_isize().max(0);
-        let y_end   = bottom_right.i().to_isize().min(self.coords.height as isize);
+                // SDF: distance from edges in each local axis
+                let dx_edge = lx.magnitude() - hw;
+                let dy_edge = ly.magnitude() - hh;
 
-        for y in y_start..=y_end {
-            for x in x_start..=x_end {
-                if (x as usize) < self.coords.width && (y as usize) < self.coords.height {
-                    let idx = (y as usize) * self.coords.width + (x as usize);
-                    self.pixels[idx] = Self::blend(colour, self.pixels[idx]);
-                }
-            }
-        }
-    }
+                // Coverage: distance inside the rect boundary, clamped to [0, 255]
+                // Positive = inside, negative = outside.
+                // Sub-pixel AA: coverage ramps over the last pixel on each edge.
+                let sdf = -dx_edge.max(dy_edge);
+                if sdf.is_negative() { continue; }
 
-    fn scan_up(&mut self, p0: CircleF4E4, p1: CircleF4E4, limit_y: ScalarF4E4, colour: u32) {
-        let x_start = p0.r().min(p1.r()).to_isize().max(0);
-        let x_end   = p0.r().max(p1.r()).to_isize().min(self.coords.width as isize);
-        for x in x_start..=x_end {
-            if let Some(edge_y) = Self::line_intersect_x(p0, p1, ScalarF4E4::from(x)) {
-                let y_start = edge_y.to_isize().max(0);
-                let y_end   = limit_y.to_isize().min(self.coords.height as isize);
-                for y in y_start..=y_end {
-                    if (x as usize) < self.coords.width && (y as usize) < self.coords.height {
-                        let idx = (y as usize) * self.coords.width + (x as usize);
-                        self.pixels[idx] = Self::blend(colour, self.pixels[idx]);
-                    }
-                }
-            }
-        }
-    }
+                // Scale fg alpha by coverage for AA, then blend normally
+                let coverage = (sdf << 8usize).to_u8();
+                let fg_a = (((colour & 0xFF) as u16 * coverage as u16) >> 8) as u32;
+                let fg = (colour & 0xFFFFFF00) | fg_a;
 
-    fn scan_down(&mut self, p0: CircleF4E4, p1: CircleF4E4, limit_y: ScalarF4E4, colour: u32) {
-        let x_start = p0.r().min(p1.r()).to_isize().max(0);
-        let x_end   = p0.r().max(p1.r()).to_isize().min(self.coords.width as isize);
-        for x in x_start..=x_end {
-            if let Some(edge_y) = Self::line_intersect_x(p0, p1, ScalarF4E4::from(x)) {
-                let y_start = limit_y.to_isize().max(0);
-                let y_end   = edge_y.to_isize().min(self.coords.height as isize);
-                for y in y_start..=y_end {
-                    if (x as usize) < self.coords.width && (y as usize) < self.coords.height {
-                        let idx = (y as usize) * self.coords.width + (x as usize);
-                        self.pixels[idx] = Self::blend(colour, self.pixels[idx]);
-                    }
-                }
-            }
-        }
-    }
-
-    fn scan_left(&mut self, p0: CircleF4E4, p1: CircleF4E4, limit_x: ScalarF4E4, colour: u32) {
-        let y_start = p0.i().min(p1.i()).to_isize().max(0);
-        let y_end   = p0.i().max(p1.i()).to_isize().min(self.coords.height as isize);
-        for y in y_start..=y_end {
-            if let Some(edge_x) = Self::line_intersect_y(p0, p1, ScalarF4E4::from(y)) {
-                let x_start = limit_x.to_isize().max(0);
-                let x_end   = edge_x.to_isize().min(self.coords.width as isize);
-                for x in x_start..=x_end {
-                    if (x as usize) < self.coords.width && (y as usize) < self.coords.height {
-                        let idx = (y as usize) * self.coords.width + (x as usize);
-                        self.pixels[idx] = Self::blend(colour, self.pixels[idx]);
-                    }
-                }
-            }
-        }
-    }
-
-    fn scan_right(&mut self, p0: CircleF4E4, p1: CircleF4E4, limit_x: ScalarF4E4, colour: u32) {
-        let y_start = p0.i().min(p1.i()).to_isize().max(0);
-        let y_end   = p0.i().max(p1.i()).to_isize().min(self.coords.height as isize);
-        for y in y_start..=y_end {
-            if let Some(edge_x) = Self::line_intersect_y(p0, p1, ScalarF4E4::from(y)) {
-                let x_start = edge_x.to_isize().max(0);
-                let x_end   = limit_x.to_isize().min(self.coords.width as isize);
-                for x in x_start..=x_end {
-                    if (x as usize) < self.coords.width && (y as usize) < self.coords.height {
-                        let idx = (y as usize) * self.coords.width + (x as usize);
-                        self.pixels[idx] = Self::blend(colour, self.pixels[idx]);
-                    }
-                }
+                let idx = (py as usize) * self.coords.width + (px as usize);
+                self.pixels[idx] = Self::blend(fg, self.pixels[idx], fg_a as u8);
             }
         }
     }

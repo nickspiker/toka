@@ -18,7 +18,7 @@ impl CanvasFast {
                 if dx * dx + dy * dy <= r * r {
                     if (px as usize) < self.coords.width && (py as usize) < self.coords.height {
                         let idx = (py as usize) * self.coords.width + (px as usize);
-                        self.pixels[idx] = Self::blend(colour, self.pixels[idx]);
+                        self.pixels[idx] = Self::blend(colour, self.pixels[idx], (colour & 0xFF) as u8);
                     }
                 }
             }
@@ -46,7 +46,7 @@ impl CanvasFast {
                 if dist_sq >= r_inner * r_inner && dist_sq <= r_outer * r_outer {
                     if (px as usize) < self.coords.width && (py as usize) < self.coords.height {
                         let idx = (py as usize) * self.coords.width + (px as usize);
-                        self.pixels[idx] = Self::blend(colour, self.pixels[idx]);
+                        self.pixels[idx] = Self::blend(colour, self.pixels[idx], (colour & 0xFF) as u8);
                     }
                 }
             }

@@ -21,7 +21,7 @@
 //! Type checking happens at build time via Rust's type system in the builder API.
 //! Runtime trusts the bytecode and relies on Rust panics/bounds checks for safety.
 
-use crate::drawing::CanvasFast as Canvas;
+use crate::drawing::Canvas;
 use crate::opcode::Opcode;
 use spirix::{CircleF4E4, ScalarF4E4};
 use std::collections::HashMap;
@@ -188,7 +188,7 @@ impl VM {
             call_stack: Vec::new(),
             function_map: HashMap::new(),
             halted: false,
-            canvas: Canvas::new(width, height),
+            canvas: Canvas::new_fast(width, height),
             trace: Vec::new(),
             scene_vsf: None,
             scene_dirty: false,

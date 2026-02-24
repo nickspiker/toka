@@ -4,7 +4,7 @@
 //! to the Canvas without any intermediate representation. Transforms are tracked
 //! as we traverse the scene graph hierarchy.
 
-use crate::drawing::CanvasFast;
+use crate::drawing::Canvas;
 use spirix::{CircleF4E4, ScalarF4E4};
 use vsf::types::{Fill, Transform, VsfType};
 
@@ -23,7 +23,7 @@ impl RenderContext {
     }
 
     /// Render a VSF renderable object to canvas
-    pub fn render(&mut self, vsf: &VsfType, canvas: &mut CanvasFast) -> Result<(), String> {
+    pub fn render(&mut self, vsf: &VsfType, canvas: &mut Canvas) -> Result<(), String> {
         match vsf {
             VsfType::rob(pos, size, fill, stroke, children) => {
                 self.render_box(pos, size, fill, stroke, children, canvas)
@@ -57,7 +57,7 @@ impl RenderContext {
         fill: &Fill,
         stroke: &Option<vsf::types::Stroke>,
         children: &[VsfType],
-        canvas: &mut CanvasFast,
+        canvas: &mut Canvas,
     ) -> Result<(), String> {
         let world_pos  = self.apply_transforms(*pos);
         let world_size = self.apply_transforms_size(*size);
@@ -71,8 +71,7 @@ impl RenderContext {
 
         match fill {
             Fill::Solid(colour) => {
-                let u32_colour = extract_colour_u32(colour)?;
-                canvas.fill_rotated_rect_ru(world_pos, world_size, rotation, u32_colour);
+                canvas.fill_rotated_rect_ru(world_pos, world_size, rotation, colour)?;
             }
             Fill::Gradient(_) => return Err("Gradients not implemented yet".to_string()),
         }
@@ -95,15 +94,14 @@ impl RenderContext {
         radius: &ScalarF4E4,
         fill: &Fill,
         stroke: &Option<vsf::types::Stroke>,
-        canvas: &mut CanvasFast,
+        canvas: &mut Canvas,
     ) -> Result<(), String> {
         let world_center = self.apply_transforms(*center);
         let world_radius = *radius;
 
         match fill {
             Fill::Solid(colour) => {
-                let u32_colour = extract_colour_u32(colour)?;
-                canvas.fill_circle(world_center, world_radius, u32_colour);
+                canvas.fill_circle(world_center, world_radius, colour)?;
             }
             Fill::Gradient(_) => return Err("Gradients not implemented yet".to_string()),
         }

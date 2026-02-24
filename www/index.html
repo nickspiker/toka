@@ -144,7 +144,34 @@
 
         .colour-coords {
             color: #555;
+        }
+
+        .console-toolbar {
             margin-left: auto;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .pipeline-label {
+            font-size: 10px;
+            color: #555;
+            letter-spacing: 0.05em;
+        }
+
+        .console-btn {
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            background: rgba(74, 158, 255, 0.1);
+            color: #4a9eff;
+            border: 1px solid #4a9eff44;
+            border-radius: 2px;
+            padding: 2px 8px;
+            cursor: pointer;
+        }
+
+        .console-btn:hover {
+            background: rgba(74, 158, 255, 0.2);
         }
     </style>
 </head>
@@ -156,6 +183,10 @@
             <div class="colour-swatch" id="colourSwatch"></div>
             <span class="colour-hex" id="colourHex">── ── ── ──</span>
             <span class="colour-coords" id="colourCoords">x:─── y:───</span>
+            <div class="console-toolbar">
+                <span class="pipeline-label" id="pipelineLabel">pipeline: fast</span>
+                <button class="console-btn" id="pipelineToggleBtn" onclick="togglePipeline()">toggle pipeline</button>
+            </div>
         </div>
         <div class="console-line console-info">Console output:</div>
     </div>

@@ -292,14 +292,19 @@ pub mod wasm {
         /// - Ok(()) if resize succeeded
         /// - Err(String) if no scene graph exists or rendering failed
         pub fn resize(&mut self, width: usize, height: usize) -> Result<(), String> {
-            use crate::drawing::CanvasFast as Canvas;
+            use crate::drawing::Canvas;
 
-            // Save scene VSF and zoom level
+            // Save scene VSF, zoom level, and current pipeline
             let scene = self.vm.scene_vsf().cloned();
             let ru = self.vm.canvas().ru();
+            let is_quality = matches!(self.vm.canvas(), Canvas::Quality(_));
 
-            // Create new canvas with new dimensions
-            let mut new_canvas = Canvas::new(width, height);
+            // Create new canvas preserving pipeline choice
+            let mut new_canvas = if is_quality {
+                Canvas::new_quality(width, height)
+            } else {
+                Canvas::new_fast(width, height)
+            };
             new_canvas.set_ru(ru);
 
             // Replace canvas (preserving VM state)
@@ -314,12 +319,43 @@ pub mod wasm {
             Ok(())
         }
 
+        /// Switch rendering pipeline ("fast" or "quality"), preserving canvas state
+        #[wasm_bindgen]
+        pub fn set_pipeline(&mut self, name: &str) -> Result<(), String> {
+            use crate::drawing::Canvas;
+
+            let w = self.vm.canvas().width();
+            let h = self.vm.canvas().height();
+            let ru = self.vm.canvas().ru();
+
+            let mut new_canvas = match name {
+                "fast" => Canvas::new_fast(w, h),
+                "quality" => Canvas::new_quality(w, h),
+                _ => return Err(format!("Unknown pipeline: {}", name)),
+            };
+            new_canvas.set_ru(ru);
+            self.vm.set_canvas(new_canvas);
+
+            // Re-render scene if one exists
+            if self.vm.scene_vsf().is_some() {
+                self.vm.rerender_scene()?;
+            }
+
+            Ok(())
+        }
+
         /// Check if VM has a scene VSF ready to render
         ///
         /// Returns true if render_loom has been executed and a scene VSF is stored.
         /// This indicates that resize() can be used instead of re-executing bytecode.
         pub fn has_scene(&self) -> bool {
             self.vm.scene_vsf().is_some()
+        }
+
+        /// Return the active rendering pipeline name ("fast" or "quality")
+        #[wasm_bindgen]
+        pub fn pipeline_name(&self) -> String {
+            self.vm.canvas().pipeline_name().to_string()
         }
     }
 
