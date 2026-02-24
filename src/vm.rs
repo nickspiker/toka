@@ -1116,30 +1116,6 @@ impl VM {
         }
     }
 
-    fn pop_s44(&mut self) -> Result<ScalarF4E4, String> {
-        match self.pop()? {
-            VsfType::s44(s) => Ok(s),
-            other => Err(format!("Expected s44, got {}", type_name(&other))),
-        }
-    }
-
-    fn pop_c44(&mut self) -> Result<CircleF4E4, String> {
-        match self.pop()? {
-            VsfType::c44(c) => Ok(c),
-            other => Err(format!("Expected c44, got {}", type_name(&other))),
-        }
-    }
-
-    fn pop_u3(&mut self) -> Result<u8, String> {
-        match self.pop()? {
-            VsfType::u3(u) => Ok(u),
-            other => Err(format!("Expected u3, got {}", type_name(&other))),
-        }
-    }
-
-    fn push_c44(&mut self, circle: CircleF4E4) {
-        self.stack.push(VsfType::c44(circle));
-    }
 
     /// Peek at top of stack without popping
     pub fn peek(&self) -> Option<&VsfType> {

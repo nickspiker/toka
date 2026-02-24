@@ -12,20 +12,27 @@ impl CanvasFast {
         let pw = self.ru_to_px_w(size.r());
         let ph = self.ru_to_px_h(size.i());
 
-        let center_x = (self.coords.width >> 1) as isize;
-        let center_y = (self.coords.height >> 1) as isize;
-        let px = center_x + cx - pw >> 1;
-        let py = center_y + cy - ph >> 1;
+        let px = cx - (pw >> 1);
+        let py = cy - (ph >> 1);
 
         let x1 = px.clamp(0, self.coords.width as isize) as usize;
         let y1 = py.clamp(0, self.coords.height as isize) as usize;
         let x2 = (px + pw).clamp(0, self.coords.width as isize) as usize;
         let y2 = (py + ph).clamp(0, self.coords.height as isize) as usize;
 
-        for row in y1..y2 {
-            for col in x1..x2 {
-                let idx = row * self.coords.width + col;
-                self.pixels[idx] = Self::blend(colour, self.pixels[idx], (colour & 0xFF) as u8);
+        let alpha = (colour & 0xFF) as u8;
+        let width = self.coords.width;
+
+        if alpha == 255 {
+            for row in y1..y2 {
+                self.pixels[row * width + x1..row * width + x2].fill(colour);
+            }
+        } else {
+            for row in y1..y2 {
+                for col in x1..x2 {
+                    let idx = row * width + col;
+                    self.pixels[idx] = Self::blend(colour, self.pixels[idx], alpha);
+                }
             }
         }
     }
@@ -81,33 +88,43 @@ impl CanvasFast {
             .to_isize()
             .clamp(0, self.coords.height as isize);
 
+        let base_alpha = colour as u8;
+        let width = self.coords.width;
+
         for py in y0..y1 {
+            // Hoist row-invariant rotation terms
+            let dy = py - cy;
+            let dy_cos = dy * cos;
+            let dy_sin = dy * sin;
+
             for px in x0..x1 {
-                // Translate to rect-center-relative
                 let dx = px - cx;
-                let dy = py - cy;
 
                 // Rotate into rect-local space (inverse rotation = transpose)
-                let lx = dx * cos + dy * sin;
-                let ly = dy * cos - dx * sin;
+                let lx = dx * cos + dy_sin;
+                let ly = dy_cos - dx * sin;
 
-                // SDF: distance from edges in each local axis
-                let dx_edge = lx.magnitude() - hw;
-                let dy_edge = ly.magnitude() - hh;
+                // SDF: distance inside the rect boundary (positive = inside)
+                let sdf = -(lx.magnitude() - hw).max(ly.magnitude() - hh);
 
-                // Coverage: distance inside the rect boundary, clamped to [0, 255]
-                // Positive = inside, negative = outside.
-                // Sub-pixel AA: coverage ramps over the last pixel on each edge.
-                let sdf = -dx_edge.max(dy_edge);
                 if sdf.is_negative() { continue; }
 
-                // Scale fg alpha by coverage for AA, then blend normally
-                let coverage = (sdf << 8usize).to_u8();
-                let fg_a = (((colour & 0xFF) as u16 * coverage as u16) >> 8) as u32;
-                let fg = (colour & 0xFFFFFF00) | fg_a;
+                let idx = (py as usize) * width + (px as usize);
 
-                let idx = (py as usize) * self.coords.width + (px as usize);
-                self.pixels[idx] = Self::blend(fg, self.pixels[idx], fg_a as u8);
+                // exponent > 0 means sdf > 1: fully inside, no AA needed
+                if sdf.exponent > 0 {
+                    if base_alpha == 255 {
+                        self.pixels[idx] = colour;
+                    } else {
+                        self.pixels[idx] = Self::blend(colour, self.pixels[idx], base_alpha);
+                    }
+                } else {
+                    // AA edge: scale alpha by sub-pixel coverage
+                    let coverage = (sdf << 8usize).to_u8();
+                    let fg_a = (((base_alpha as u16) * coverage as u16) >> 8) as u32;
+                    let fg = (colour & 0xFFFFFF00) | fg_a;
+                    self.pixels[idx] = Self::blend(fg, self.pixels[idx], fg_a as u8);
+                }
             }
         }
     }
