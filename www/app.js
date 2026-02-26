@@ -129,28 +129,12 @@ function setupCanvas() {
         // This prevents black flash during resize
     }
 
-    // Resize handler - re-render scene graph immediately
+    // Resize handler - full rerun to ensure all post-scene ops (draw_text etc.) execute
     function handleResize() {
         const newWidth = window.innerWidth;
         const newHeight = window.innerHeight;
 
-        if (currentVM && currentVM.has_scene()) {
-            // Efficient path: re-render scene graph at new resolution
-            try {
-                // 1. Render to new size in WASM (doesn't touch canvas)
-                currentVM.resize(newWidth, newHeight);
-
-                // 2. Update canvas size (clears it)
-                canvas.width = newWidth;
-                canvas.height = newHeight;
-
-                // 3. Immediately display new pixels (no black flash)
-                render();
-            } catch (err) {
-                log(`Resize error: ${err}`, 'error');
-            }
-        } else if (currentBytecode) {
-            // Fallback: no scene graph, re-execute bytecode (legacy mode)
+        if (currentBytecode) {
             canvas.width = newWidth;
             canvas.height = newHeight;
             reactiveRender();
@@ -194,7 +178,7 @@ function setupScrollTracking() {
         // Re-run bytecode with new scroll value
         try {
             currentVM.reset();  // Reset IP to start
-            currentVM.run(1000);
+            while (currentVM.run(256)) {}  // Run to completion in chunks
             render();
         } catch (err) {
             log(`Wheel render error: ${err}`, 'error');
@@ -270,7 +254,7 @@ function reactiveRender() {
         if (label) label.textContent = `pipeline: ${currentVM.pipeline_name()}`;
         try {
             log('Running VM...', 'info');
-            const result = currentVM.run(1000);  // Execute up to 1000 instructions
+            while (currentVM.run(256)) {}  // Run to completion
 
             // Get and display execution trace
             const trace = currentVM.get_trace();
@@ -323,13 +307,15 @@ function setupHandleInput() {
 
 // Toggle between fast and quality pipeline
 function togglePipeline() {
-    if (!currentVM) return;
+    if (!currentVM || !currentBytecode) return;
     const current = currentVM.pipeline_name();
     const next = current === 'fast' ? 'quality' : 'fast';
     try {
         currentVM.set_pipeline(next);
+        currentVM.reset();
+        while (currentVM.run(256)) {}
         const label = document.getElementById('pipelineLabel');
-        if (label) label.textContent = `pipeline: ${currentVM.pipeline_name()}`;
+        if (label) label.textContent = `pipeline: ${next}`;
         render();
         log(`Switched to ${next} pipeline`, 'info');
     } catch (err) {

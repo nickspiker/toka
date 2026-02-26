@@ -23,8 +23,12 @@
 
 use crate::drawing::Canvas;
 use crate::opcode::Opcode;
+use fontdue::Font as FontdueFont;
 use spirix::{CircleF4E4, ScalarF4E4};
 use std::collections::HashMap;
+
+/// Cache of parsed fonts keyed by BLAKE3 hash of the font file bytes
+pub type FontCache = HashMap<[u8; 32], FontdueFont>;
 // Note: We use VSF RGB directly, NOT sRGB conversion
 // WASM wrapper handles sRGB conversion on Chrome/browser side
 use vsf::decoding::parse::parse as vsf_parse;
@@ -139,15 +143,11 @@ pub struct VM {
     /// Canvas for drawing operations
     canvas: Canvas,
 
+    /// Cache of parsed fonts keyed by BLAKE3 hash of font file bytes
+    font_cache: FontCache,
+
     /// Execution trace for debugging (opcode names)
     trace: Vec<String>,
-
-    /// Scene VSF storage (ro* type rendered by render_loom)
-    /// Enables efficient resize without re-executing bytecode
-    scene_vsf: Option<VsfType>,
-
-    /// Whether scene graph has been modified since last render
-    scene_dirty: bool,
 
     /// Scroll offset X in RU (resolution-independent)
     scroll_x: ScalarF4E4,
@@ -189,9 +189,8 @@ impl VM {
             function_map: HashMap::new(),
             halted: false,
             canvas: Canvas::new_fast(width, height),
+            font_cache: HashMap::new(),
             trace: Vec::new(),
-            scene_vsf: None,
-            scene_dirty: false,
             scroll_x: ScalarF4E4::ZERO,
             scroll_y: ScalarF4E4::ZERO,
             mouse_x: ScalarF4E4::ZERO,
@@ -600,6 +599,43 @@ impl VM {
 
             // ==================== LOOM LAYOUT ====================
 
+            Opcode::draw_text => {
+                // Stack (bottom to top): font_bytes, pos (c44), size (s44), text, colour, align (u1)
+                // align: 0=center (default), 1=left, 2=right
+                let align = match self.pop()? {
+                    VsfType::u3(n) => n,
+                    other => return Err(format!("draw_text: expected u3 (u8) for align, got {:?}", other)),
+                };
+                let colour = self.pop()?;
+                let text = match self.pop()? {
+                    VsfType::x(s) | VsfType::l(s) => s,
+                    other => return Err(format!("draw_text: expected string for text, got {:?}", other)),
+                };
+                let size = match self.pop()? {
+                    VsfType::s44(s) => s,
+                    other => return Err(format!("draw_text: expected s44 for size, got {:?}", other)),
+                };
+                let pos = match self.pop()? {
+                    VsfType::c44(c) => c,
+                    other => return Err(format!("draw_text: expected c44 for pos, got {:?}", other)),
+                };
+                let font_bytes = match self.pop()? {
+                    VsfType::v(b'b', bytes) => bytes,
+                    other => return Err(format!("draw_text: expected binary blob for font, got {:?}", other)),
+                };
+                let font_key = *blake3::hash(&font_bytes).as_bytes();
+                self.canvas.draw_text(
+                    &mut self.font_cache,
+                    font_key,
+                    &font_bytes,
+                    pos,
+                    size,
+                    &text,
+                    &colour,
+                    align,
+                )?;
+            }
+
             Opcode::clear_canvas => {
                 // Pop VSF colour type (rc*, ra, or rw)
                 let colour = self.pop()?;
@@ -614,10 +650,6 @@ impl VM {
                 // Render directly from ro* type
                 let mut renderer = crate::renderer::RenderContext::new();
                 renderer.render(&vsf, &mut self.canvas)?;
-
-                // Store VSF for resize handling (not LayoutNode!)
-                self.scene_vsf = Some(vsf);
-                self.scene_dirty = true;
             }
 
             Opcode::scroll_x => {
@@ -1139,22 +1171,7 @@ impl VM {
     }
 
     /// Check if a scene has been rendered
-    pub fn has_scene(&self) -> bool {
-        self.scene_vsf.is_some()
-    }
-
-    /// Get reference to the stored scene VSF (if any)
-    pub fn scene_vsf(&self) -> Option<&VsfType> {
-        self.scene_vsf.as_ref()
-    }
-
-    /// Set the stored scene VSF (for resize handling)
-    pub fn set_scene_vsf(&mut self, vsf: VsfType) {
-        self.scene_vsf = Some(vsf);
-        self.scene_dirty = true;
-    }
-
-    /// Replace the canvas (for resize handling)
+    /// Replace the canvas (for pipeline switching)
     pub fn set_canvas(&mut self, canvas: Canvas) {
         self.canvas = canvas;
     }
@@ -1219,28 +1236,6 @@ impl VM {
     /// Get current time (Unix timestamp in seconds)
     pub fn time(&self) -> ScalarF4E4 {
         self.time
-    }
-
-    /// Re-render stored scene VSF to canvas (for resize handling)
-    ///
-    /// This enables efficient window resize without re-executing bytecode.
-    /// The scene VSF is preserved from render_loom execution and can be
-    /// re-rasterized at any resolution.
-    pub fn rerender_scene(&mut self) -> Result<(), String> {
-        let scene_vsf = self
-            .scene_vsf
-            .as_ref()
-            .ok_or("No scene to render")?;
-
-        // Clear canvas to black
-        self.canvas.clear(&VsfType::rck)?;
-
-        // Re-render scene using renderer
-        let mut renderer = crate::renderer::RenderContext::new();
-        renderer.render(scene_vsf, &mut self.canvas)?;
-        self.scene_dirty = false;
-
-        Ok(())
     }
 
     /// Get and clear execution trace

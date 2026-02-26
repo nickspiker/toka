@@ -88,12 +88,12 @@ impl Program {
         self
     }
 
-    /// Push string value (encodes as VSF x - UTF-8)
-    /// VSF: {ps}x[len][bytes]
+    /// Push string value (encodes as VSF l - ASCII)
+    /// VSF: {ps}l[len][bytes]
     pub fn ps_str(mut self, s: &str) -> Self {
         emit_op(&mut self.bytecode, b'p', b's');
         self.bytecode
-            .extend_from_slice(&VsfType::x(s.to_string()).flatten());
+            .extend_from_slice(&VsfType::l(s.to_string()).flatten());
         self
     }
 
@@ -503,6 +503,44 @@ impl Program {
     }
 
     // ==================== RENDERING ====================
+
+    /// Push raw bytes as a VSF binary blob (vb3 encoding)
+    /// VSF: {ps}v'b'[bytes]
+    pub fn ps_bytes(mut self, bytes: &[u8]) -> Self {
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::v(b'b', bytes.to_vec()).flatten());
+        self
+    }
+
+    /// Draw text, center-aligned (default).
+    /// Stack before call: font_bytes(vb), pos(c44), size(s44), text(x|l), colour
+    /// VSF: {ps}u3[0x00]{dt}
+    pub fn dt_center(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::u3(0).flatten());
+        emit_op(&mut self.bytecode, b'd', b't');
+        self
+    }
+
+    /// Draw text, left-aligned.
+    /// Stack before call: font_bytes(vb), pos(c44), size(s44), text(x|l), colour
+    /// VSF: {ps}u3[0x01]{dt}
+    pub fn dt_left(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::u3(1).flatten());
+        emit_op(&mut self.bytecode, b'd', b't');
+        self
+    }
+
+    /// Draw text, right-aligned.
+    /// Stack before call: font_bytes(vb), pos(c44), size(s44), text(x|l), colour
+    /// VSF: {ps}u3[0x02]{dt}
+    pub fn dt_right(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::u3(2).flatten());
+        emit_op(&mut self.bytecode, b'd', b't');
+        self
+    }
 
     /// Clear canvas: pop VSF colour (rc*, ra, rw) and fill canvas
     /// VSF: {cr}

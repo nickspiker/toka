@@ -218,14 +218,14 @@ pub mod wasm {
         ///
         /// Uses logarithmic scaling: each step multiplies by 33/32 (in) or 32/33 (out)
         pub fn adjust_zoom(&mut self, steps: f64) {
-            self.vm.canvas_mut().adjust_zoom(ScalarF4E4::from(steps));
+            self.vm.canvas_mut().adjust_zoom(ScalarF4E4::from_f64(steps));
         }
 
         /// Set RU multiplier directly
         ///
         /// Clamped to [0.125, 8] for sanity.
         pub fn set_ru(&mut self, ru: f64) {
-            self.vm.canvas_mut().set_ru(ScalarF4E4::from(ru));
+            self.vm.canvas_mut().set_ru(ScalarF4E4::from_f64(ru));
         }
 
         /// Get current RU zoom multiplier
@@ -245,7 +245,7 @@ pub mod wasm {
         /// Programs can read scroll via {sx} and {sy} opcodes.
         /// Call `rerun()` after changing scroll to re-execute bytecode with new values.
         pub fn set_scroll(&mut self, scroll_x: f64, scroll_y: f64) {
-            self.vm.set_scroll(ScalarF4E4::from(scroll_x), ScalarF4E4::from(scroll_y));
+            self.vm.set_scroll(ScalarF4E4::from_f64(scroll_x), ScalarF4E4::from_f64(scroll_y));
         }
 
         /// Get scroll offset X (in RU)
@@ -279,47 +279,9 @@ pub mod wasm {
             Ok(!self.vm.is_halted())
         }
 
-        /// Resize canvas and re-render scene graph (efficient resize path)
+        /// Switch rendering pipeline ("fast" or "quality")
         ///
-        /// This avoids re-executing bytecode by reusing the stored scene graph.
-        /// Much faster than creating a new VM and re-running bytecode.
-        ///
-        /// # Arguments
-        /// - `width` - New canvas width in pixels
-        /// - `height` - New canvas height in pixels
-        ///
-        /// # Returns
-        /// - Ok(()) if resize succeeded
-        /// - Err(String) if no scene graph exists or rendering failed
-        pub fn resize(&mut self, width: usize, height: usize) -> Result<(), String> {
-            use crate::drawing::Canvas;
-
-            // Save scene VSF, zoom level, and current pipeline
-            let scene = self.vm.scene_vsf().cloned();
-            let ru = self.vm.canvas().ru();
-            let is_quality = matches!(self.vm.canvas(), Canvas::Quality(_));
-
-            // Create new canvas preserving pipeline choice
-            let mut new_canvas = if is_quality {
-                Canvas::new_quality(width, height)
-            } else {
-                Canvas::new_fast(width, height)
-            };
-            new_canvas.set_ru(ru);
-
-            // Replace canvas (preserving VM state)
-            self.vm.set_canvas(new_canvas);
-
-            // Re-render scene VSF if it exists
-            if let Some(scene_vsf) = scene {
-                self.vm.set_scene_vsf(scene_vsf);
-                self.vm.rerender_scene()?;
-            }
-
-            Ok(())
-        }
-
-        /// Switch rendering pipeline ("fast" or "quality"), preserving canvas state
+        /// Caller is responsible for re-running bytecode after switching.
         #[wasm_bindgen]
         pub fn set_pipeline(&mut self, name: &str) -> Result<(), String> {
             use crate::drawing::Canvas;
@@ -335,21 +297,7 @@ pub mod wasm {
             };
             new_canvas.set_ru(ru);
             self.vm.set_canvas(new_canvas);
-
-            // Re-render scene if one exists
-            if self.vm.scene_vsf().is_some() {
-                self.vm.rerender_scene()?;
-            }
-
             Ok(())
-        }
-
-        /// Check if VM has a scene VSF ready to render
-        ///
-        /// Returns true if render_loom has been executed and a scene VSF is stored.
-        /// This indicates that resize() can be used instead of re-executing bytecode.
-        pub fn has_scene(&self) -> bool {
-            self.vm.scene_vsf().is_some()
         }
 
         /// Return the active rendering pipeline name ("fast" or "quality")

@@ -16,7 +16,7 @@
 //! Pixel buffer stores linear RGBA as [ScalarF4E4; 4].
 //! sRGB OETF + error diffusion downconversion applied at to_rgba_bytes().
 
-use spirix::{CircleF4E4, ScalarF4E4};
+use spirix::{sf, CircleF4E4, ScalarF4E4};
 
 /// Linear RGBA pixel: [R, G, B, A] in S44, all channels [0.0, 1.0]
 pub type Pixel = [ScalarF4E4; 4];
@@ -76,7 +76,7 @@ impl CanvasQuality {
 
     /// Set RU multiplier
     pub fn set_ru(&mut self, ru: ScalarF4E4) {
-        self.ru = ru.clamp(0.125, 8);
+        self.ru = ru.clamp(sf!(0.125), ScalarF4E4::from(8));
     }
 
     /// Adjust zoom by steps (positive = zoom in, negative = zoom out)

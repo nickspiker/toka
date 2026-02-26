@@ -298,6 +298,10 @@ pub enum Opcode {
     /// VSF: {rl}
     render_loom,
 
+    /// Draw text: pop colour, text (string), size (s44), pos (c44), font_bytes (bytes)
+    /// VSF: {dt}
+    draw_text,
+
     // ==================== CONTROL FLOW ====================
     /// Call function at bytecode offset
     /// VSF: {cn}[offset:u]
@@ -486,6 +490,7 @@ impl Opcode {
             // Loom layout
             0x6372 => Some(Self::clear_canvas),  // cr
             0x726c => Some(Self::render_loom),   // rl
+            0x6474 => Some(Self::draw_text),     // dt
 
             // Control flow
             0x636e => Some(Self::call),          // cn
@@ -620,6 +625,7 @@ impl Opcode {
             Self::build_transform => *b"kt",
             Self::clear_canvas => *b"cr",
             Self::render_loom => *b"rl",
+            Self::draw_text => *b"dt",
             Self::call => *b"cn",
             Self::return_ => *b"re",
             Self::return_value => *b"rv",

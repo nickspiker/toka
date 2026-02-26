@@ -8,6 +8,8 @@ use toka::builder::Program;
 use toka::capsule::CapsuleBuilder;
 use vsf::types::{Fill, VsfType};
 
+const FONT: &[u8] = include_bytes!("/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf");
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Blue circle (standalone, renders first = behind)
     let blue_circle = VsfType::roc(
@@ -49,6 +51,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Build row from stack and render
         .kw() // Build row from stack
         .rl() // Render
+        // Draw text "Box" over the scene
+        .ps_bytes(FONT)                  // font bytes
+        .ps_c44(-0.15, -0.05)            // pos (near center)
+        .ps_s44(0.08)                    // size (0.08 RU)
+        .ps_str("Box")                   // text
+        .ps(&VsfType::rcw.flatten()) // white
+        .dt() // draw_text
         .hl() // Halt
         .build();
 

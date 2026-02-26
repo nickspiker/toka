@@ -19,6 +19,8 @@ path = "src/main.rs"
 [dependencies]
 # Core dependencies for deterministic computation
 spirix = { version = "0.0.7", path = "../spirix" }
+fontdue = { package = "fontdue-spirix", path = "../fontdue-spirix", default-features = false }
+blake3 = "1"
 vsf = { version = "0.3.0", path = "../vsf", default-features = false, features = ["spirix", "crypto", "inspect"] }
 bytemuck = "1.14"
 

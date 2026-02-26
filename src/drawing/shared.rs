@@ -12,7 +12,7 @@
 //! - +X = right, +Y = down
 //! - All coordinates in RU space, converted to pixels internally
 
-use spirix::{CircleF4E4, ScalarF4E4};
+use spirix::{sf, CircleF4E4, ScalarF4E4};
 
 /// RU coordinate system state — embedded in both canvas types
 pub struct RuCoords {
@@ -41,7 +41,7 @@ impl RuCoords {
     pub fn half_dims(&self) -> CircleF4E4 { self.half_dims }
 
     pub fn set_ru(&mut self, ru: ScalarF4E4) {
-        self.ru = ru.clamp(0.125, 8);
+        self.ru = ru.clamp(sf!(0.125), ScalarF4E4::from(8));
     }
 
     pub fn adjust_zoom(&mut self, steps: ScalarF4E4) {

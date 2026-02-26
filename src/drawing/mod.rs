@@ -37,6 +37,7 @@ pub mod text_quality;
 pub use canvas_fast::CanvasFast;
 pub use canvas_quality::{CanvasQuality, Pixel};
 
+use crate::vm::FontCache;
 use spirix::{CircleF4E4, ScalarF4E4};
 
 /// Runtime-selectable canvas — both pipelines compiled in, toggled at runtime.
@@ -163,6 +164,31 @@ impl Canvas {
             Canvas::Quality(c) => {
                 let pixel = crate::renderer::extract_colour_linear(colour)?;
                 c.fill_rotated_rect_ru(pos, size, angle, pixel);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn draw_text(
+        &mut self,
+        font_cache: &mut FontCache,
+        font_key: [u8; 32],
+        font_bytes: &[u8],
+        pos: CircleF4E4,
+        size: ScalarF4E4,
+        text: &str,
+        colour: &vsf::VsfType,
+        align: u8,
+    ) -> Result<(), String> {
+        match self {
+            Canvas::Fast(c) => {
+                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
+                c.draw_text(font_cache, font_key, font_bytes, pos, size, text, u32_colour, align);
+                Ok(())
+            }
+            Canvas::Quality(c) => {
+                let pixel = crate::renderer::extract_colour_linear(colour)?;
+                c.draw_text(font_cache, font_key, font_bytes, pos, size, text, pixel, align);
                 Ok(())
             }
         }
