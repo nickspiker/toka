@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ps_s44(0.08)                    // size (0.08 RU)
         .ps_str("Box")                   // text
         .ps(&VsfType::rcw.flatten()) // white
-        .dt() // draw_text
+        .dt_center()
         .hl() // Halt
         .build();
 
