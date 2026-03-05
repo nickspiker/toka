@@ -1,25 +1,16 @@
-//! Text rendering for CanvasQuality using fontdue-spirix
+//! Text rendering for CanvasQuality using fontdue-spirix Layout engine
 
 use crate::drawing::canvas_quality::{CanvasQuality, Pixel};
+use crate::drawing::shared::TextSettings;
 use crate::vm::FontCache;
+use fontdue::layout::{CoordinateSystem, HorizontalAlign, Layout, LayoutSettings, TextStyle};
 use fontdue::Font as FontdueFont;
 use spirix::{CircleF4E4, ScalarF4E4};
 
 impl CanvasQuality {
-    /// Draw text onto the canvas.
+    /// Draw text onto the canvas using fontdue's Layout engine.
     ///
-    /// Stack: font_bytes, pos (c44), size (s44), text, colour
-    /// Glyphs are alpha-blended in linear light using the coverage bitmap.
-    /// Measure text width in pixels without rasterizing bitmaps.
-    fn measure_width(font: &FontdueFont, text: &str, px: ScalarF4E4) -> isize {
-        text.chars()
-            .map(|ch| font.metrics(ch, px).advance_width.ceil().to_isize())
-            .sum()
-    }
-
-    /// Draw text onto the canvas.
-    ///
-    /// `align`: 0=center (default), 1=left, 2=right
+    /// Layout handles kerning, line wrapping, alignment, and line height.
     pub fn draw_text(
         &mut self,
         font_cache: &mut FontCache,
@@ -29,9 +20,12 @@ impl CanvasQuality {
         size: ScalarF4E4,
         text: &str,
         colour: Pixel,
-        align: u8,
+        settings: &TextSettings,
     ) {
-        let font = font_cache.entry(font_key).or_insert_with(|| {
+        let cache_key = settings.font_cache_key(font_key);
+        let font = font_cache.entry(cache_key).or_insert_with(|| {
+            // TODO: when weight/tilt is set, apply set_variation() on the
+            // ttf-parser Face before constructing the fontdue Font.
             FontdueFont::from_bytes(font_bytes, fontdue::FontSettings::default())
                 .expect("draw_text: invalid font bytes")
         });
@@ -40,37 +34,74 @@ impl CanvasQuality {
         if !px.is_positive() { return; }
 
         let anchor_x = self.ru_to_px_x(pos.r());
-        let start_y = self.ru_to_px_y(pos.i());
+        let anchor_y = self.ru_to_px_y(pos.i());
         let canvas_w = self.width() as isize;
         let canvas_h = self.height() as isize;
 
-        let text_width = Self::measure_width(font, text, px);
-        let start_x = match align {
-            1 => anchor_x,                      // left
-            2 => anchor_x - text_width,         // right
-            _ => anchor_x - text_width / 2,     // center (default)
+        let h_align = match settings.align {
+            1 => HorizontalAlign::Left,
+            2 => HorizontalAlign::Right,
+            _ => HorizontalAlign::Center,
         };
 
-        let mut cursor_x = start_x;
+        let wrap_px = settings.wrap.map(|w| w * self.span() * self.ru());
 
-        for ch in text.chars() {
-            let (metrics, bitmap) = font.rasterize(ch, px);
+        // Lay out left-to-right from anchor. We'll shift glyphs for center/right after.
+        let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+        let layout_settings = LayoutSettings {
+            x: ScalarF4E4::from(anchor_x as i32),
+            y: ScalarF4E4::from(anchor_y as i32),
+            max_width: wrap_px,
+            horizontal_align: HorizontalAlign::Left,
+            line_height: settings.leading,
+            ..LayoutSettings::default()
+        };
+        layout.reset(&layout_settings);
+        layout.append(&[font as &FontdueFont], &TextStyle::new(text, px, 0));
+
+        // For center/right alignment, compute text width and shift glyphs
+        let shift_x = if settings.align == 1 {
+            ScalarF4E4::ZERO
+        } else {
+            let glyphs = layout.glyphs();
+            if glyphs.is_empty() {
+                ScalarF4E4::ZERO
+            } else {
+                let first_x = glyphs[0].x;
+                let last = &glyphs[glyphs.len() - 1];
+                let text_w = last.x + ScalarF4E4::from(last.width as i32) - first_x;
+                match settings.align {
+                    2 => -text_w,
+                    _ => -(text_w >> 1usize),
+                }
+            }
+        };
+
+        let fonts = [font as &FontdueFont];
+        for glyph in layout.glyphs() {
+            if glyph.width == 0 || glyph.height == 0 { continue; }
+            if !glyph.char_data.rasterize() { continue; }
+
+            let (metrics, bitmap) = fonts[glyph.font_index].rasterize_config(glyph.key);
             let glyph_w = metrics.width as isize;
             let glyph_h = metrics.height as isize;
-            let offset_x = metrics.xmin as isize;
-            let offset_y = metrics.ymin as isize;
+            let gx = (glyph.x + shift_x).floor().to_isize();
+            let gy = glyph.y.floor().to_isize();
 
-            for row in 0..glyph_h {
-                let py = start_y - offset_y - glyph_h + row;
-                if py < 0 || py >= canvas_h { continue; }
-                for col in 0..glyph_w {
-                    let px_x = cursor_x + offset_x + col;
-                    if px_x < 0 || px_x >= canvas_w { continue; }
-                    let coverage = bitmap[(row * glyph_w + col) as usize];
+            let row_start = ((-gy).max(0)) as isize;
+            let row_end = ((canvas_h - gy).min(glyph_h)) as isize;
+            let col_start = ((-gx).max(0)) as isize;
+            let col_end = ((canvas_w - gx).min(glyph_w)) as isize;
+
+            for row in row_start..row_end {
+                let py = (gy + row) as usize;
+                let row_offset = row * glyph_w;
+                for col in col_start..col_end {
+                    let coverage = bitmap[(row_offset + col) as usize];
                     if coverage == 0 { continue; }
                     let alpha = ScalarF4E4::from(coverage as i32) >> 8usize;
                     let inv = ScalarF4E4::ONE - alpha;
-                    let idx = (py * canvas_w + px_x) as usize;
+                    let idx = py * canvas_w as usize + (gx + col) as usize;
                     let bg = self.pixels_mut()[idx];
                     self.pixels_mut()[idx] = [
                         colour[0] * alpha + bg[0] * inv,
@@ -80,8 +111,6 @@ impl CanvasQuality {
                     ];
                 }
             }
-
-            cursor_x += metrics.advance_width.ceil().to_isize();
         }
     }
 }

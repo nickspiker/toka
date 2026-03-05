@@ -62,3 +62,82 @@ impl RuCoords {
     #[inline] pub fn ru_to_px_w(&self, w: ScalarF4E4) -> isize { (w * self.span * self.ru).to_isize() }
     #[inline] pub fn ru_to_px_h(&self, h: ScalarF4E4) -> isize { (h * self.span * self.ru).to_isize() }
 }
+
+/// Text layout settings — mirrors VSF TextStyle tags.
+///
+/// Tags (single lowercase ASCII):
+///   `l` — align left (flag)
+///   `r` — align right (flag)
+///   `e` + s44 — leading (line height multiplier)
+///   `k` + s44 — kerning (letter spacing in RU)
+///   `w` + s44 — weight (100–900, variable font axis)
+///   `i` + s44 — tilt (italic angle in degrees, variable font axis)
+///   `x` + s44 — wrap width (box width in RU)
+///   `f` + 32  — font hash (handled separately via font_key)
+///
+/// Defaults: center-aligned, no wrap, default weight/leading.
+pub struct TextSettings {
+    /// Horizontal alignment: 0=center, 1=left (`l`), 2=right (`r`)
+    pub align: u8,
+    /// `e` — Line height multiplier (1.0 = default)
+    pub leading: ScalarF4E4,
+    /// `k` — Letter spacing in RU (0.0 = default, added to advance width)
+    pub kerning: ScalarF4E4,
+    /// `w` — Font weight 100–900 (stub: variable font axis)
+    pub weight: Option<ScalarF4E4>,
+    /// `i` — Italic tilt angle in degrees (stub: variable font axis)
+    pub tilt: Option<ScalarF4E4>,
+    /// `x` — Wrap box width in RU. None = no wrapping.
+    pub wrap: Option<ScalarF4E4>,
+}
+
+impl Default for TextSettings {
+    fn default() -> Self {
+        TextSettings {
+            align: 0,
+            leading: ScalarF4E4::ONE,
+            kerning: ScalarF4E4::ZERO,
+            weight: None,
+            tilt: None,
+            wrap: None,
+        }
+    }
+}
+
+impl TextSettings {
+    /// Build from a VSF TextStyle, if present.
+    #[cfg(feature = "spirix")]
+    pub fn from_vsf_style(style: &Option<vsf::types::toka_tree::TextStyle>) -> Self {
+        let mut s = Self::default();
+        if let Some(ts) = style {
+            if let Some(a) = ts.align { s.align = a; }
+            if let Some(e) = ts.leading { s.leading = e; }
+            if let Some(k) = ts.kerning { s.kerning = k; }
+            s.weight = ts.weight;
+            s.tilt = ts.tilt;
+            s.wrap = ts.wrap;
+        }
+        s
+    }
+
+    /// Compute a font cache key that incorporates variable font axes (weight, tilt).
+    /// If no variation axes are set, returns the plain font_key unchanged.
+    pub fn font_cache_key(&self, font_key: [u8; 32]) -> [u8; 32] {
+        if self.weight.is_none() && self.tilt.is_none() {
+            return font_key;
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&font_key);
+        if let Some(w) = self.weight {
+            hasher.update(b"wght");
+            hasher.update(&w.fraction.to_le_bytes());
+            hasher.update(&w.exponent.to_le_bytes());
+        }
+        if let Some(i) = self.tilt {
+            hasher.update(b"ital");
+            hasher.update(&i.fraction.to_le_bytes());
+            hasher.update(&i.exponent.to_le_bytes());
+        }
+        *hasher.finalize().as_bytes()
+    }
+}

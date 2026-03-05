@@ -512,6 +512,14 @@ impl Program {
         self
     }
 
+    /// Draw text with no align param (defaults to center).
+    /// Stack before call: font_bytes(vb), pos(c44), size(s44), text(x|l), colour
+    /// VSF: {dt}
+    pub fn dt(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'd', b't');
+        self
+    }
+
     /// Draw text, center-aligned (default).
     /// Stack before call: font_bytes(vb), pos(c44), size(s44), text(x|l), colour
     /// VSF: {ps}u3[0x00]{dt}

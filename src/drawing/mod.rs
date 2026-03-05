@@ -36,6 +36,7 @@ pub mod text_quality;
 
 pub use canvas_fast::CanvasFast;
 pub use canvas_quality::{CanvasQuality, Pixel};
+pub use shared::TextSettings;
 
 use crate::vm::FontCache;
 use spirix::{CircleF4E4, ScalarF4E4};
@@ -178,17 +179,17 @@ impl Canvas {
         size: ScalarF4E4,
         text: &str,
         colour: &vsf::VsfType,
-        align: u8,
+        settings: &TextSettings,
     ) -> Result<(), String> {
         match self {
             Canvas::Fast(c) => {
                 let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.draw_text(font_cache, font_key, font_bytes, pos, size, text, u32_colour, align);
+                c.draw_text(font_cache, font_key, font_bytes, pos, size, text, u32_colour, settings);
                 Ok(())
             }
             Canvas::Quality(c) => {
                 let pixel = crate::renderer::extract_colour_linear(colour)?;
-                c.draw_text(font_cache, font_key, font_bytes, pos, size, text, pixel, align);
+                c.draw_text(font_cache, font_key, font_bytes, pos, size, text, pixel, settings);
                 Ok(())
             }
         }

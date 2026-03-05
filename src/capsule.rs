@@ -46,6 +46,7 @@ pub struct CapsuleBuilder {
     bytecode: Vec<u8>,
     signer_pubkey: Option<[u8; 32]>,
     signature: Option<[u8; 64]>,
+    provenance: Option<[u8; 32]>,
 }
 
 impl CapsuleBuilder {
@@ -55,7 +56,17 @@ impl CapsuleBuilder {
             bytecode,
             signer_pubkey: None,
             signature: None,
+            provenance: None,
         }
+    }
+
+    /// Set a custom provenance hash (handle-derived identity)
+    ///
+    /// When set, this hash is used as-is instead of auto-computing from content.
+    /// Use this for handle-based capsules where the provenance is the handle proof.
+    pub fn provenance(mut self, hash: [u8; 32]) -> Self {
+        self.provenance = Some(hash);
+        self
     }
 
     /// Add Ed25519 signature for authenticity
@@ -83,6 +94,11 @@ impl CapsuleBuilder {
         let mut section = VsfSection::new("toka");
         section.add_field_multi("main", values);
         let mut builder = VsfBuilder::new().add_section_direct(section);
+
+        // Set custom provenance hash if provided
+        if let Some(hp) = self.provenance {
+            builder = builder.provenance_hash(hp);
+        }
 
         // Add signature if provided
         if let (Some(pubkey), Some(sig)) = (self.signer_pubkey, self.signature) {
@@ -195,8 +211,9 @@ impl Capsule {
                 })
                 .map_err(|e| format!("Capsule signature verification failed: {}", e))
         } else {
-            // Fall back to hb integrity hash for unsigned capsules
-            vsf::verification::is_original(&self.raw)
+            // Verify hb rolling hash for unsigned capsules (integrity check)
+            // Note: hp is identity (may be handle-derived), hb is integrity
+            vsf::verification::verify_file_hash(&self.raw)
                 .map_err(|e| format!("Capsule integrity check (hb) failed: {}", e))
         }
     }

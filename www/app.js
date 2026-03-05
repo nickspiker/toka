@@ -189,15 +189,20 @@ function setupScrollTracking() {
     log('Wheel tracking enabled', 'info');
 }
 
-// Handle resolution (temporary local mapping, will become FGTW later)
-// Automatically maps: "box" → "capsules/box.vsf"
+// Handle resolution via memory-hard proof-of-work
+// plaintext → blake3 → 17-round proof → base64url filename → fetch capsule
 async function resolveHandle(handleName) {
     const normalized = handleName.toLowerCase().trim();
-    const filename = `capsules/${normalized}.vsf`;
 
     try {
         log(`Resolving handle: "${handleName}"`, 'info');
-        const response = await fetch(filename);
+
+        // Run memory-hard proof to get deterministic filename
+        log('Computing handle proof (this takes a few seconds)...', 'info');
+        const filename = wasmModule.resolve_handle(normalized);
+        log(`Proof complete → capsules/${filename}`, 'info');
+
+        const response = await fetch(`capsules/${filename}`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -246,10 +251,16 @@ async function loadAndRenderCapsule(handleName) {
 function reactiveRender() {
     if (!currentBytecode) return;
 
+    // Preserve pipeline across re-creation
+    const prevPipeline = currentVM ? currentVM.pipeline_name() : 'fast';
+
     log(`Creating VM with ${currentBytecode.length} bytes of bytecode...`, 'info');
 
     currentVM = createVM(currentBytecode);
     if (currentVM) {
+        if (prevPipeline !== currentVM.pipeline_name()) {
+            currentVM.set_pipeline(prevPipeline);
+        }
         const label = document.getElementById('pipelineLabel');
         if (label) label.textContent = `pipeline: ${currentVM.pipeline_name()}`;
         try {

@@ -369,6 +369,25 @@ pub mod wasm {
             .build()
     }
 
+    /// Resolve a plaintext handle to its base64url capsule filename.
+    ///
+    /// Runs the memory-hard proof (~5s) and returns the filename (e.g. "F0ju6...nvA.vsf").
+    /// The caller fetches `capsules/{filename}` to load the capsule.
+    #[wasm_bindgen]
+    pub fn resolve_handle(handle: &str) -> String {
+        let (_id, filename) = vsf::handle::resolve_handle(handle);
+        filename
+    }
+
+    /// Resolve a plaintext handle and return both the hex public ID and filename.
+    ///
+    /// Returns a two-element array: [hex_id, filename].
+    #[wasm_bindgen]
+    pub fn resolve_handle_full(handle: &str) -> Vec<String> {
+        let (id, filename) = vsf::handle::resolve_handle(handle);
+        vec![id.to_hex().to_string(), filename]
+    }
+
     /// Generate arithmetic test bytecode (2 + 3 = 5)
     #[wasm_bindgen]
     pub fn generate_arithmetic_bytecode() -> Vec<u8> {

@@ -600,13 +600,22 @@ impl VM {
             // ==================== LOOM LAYOUT ====================
 
             Opcode::draw_text => {
-                // Stack (bottom to top): font_bytes, pos (c44), size (s44), text, colour, align (u1)
-                // align: 0=center (default), 1=left, 2=right
-                let align = match self.pop()? {
-                    VsfType::u3(n) => n,
-                    other => return Err(format!("draw_text: expected u3 (u8) for align, got {:?}", other)),
+                // Stack (bottom→top): font_bytes, pos (c44), size (s44), text, colour[, align (u3)]
+                // align: 0=center (default), 1=left, 2=right — optional, defaults to 0
+                // Full TextStyle modifiers (leading, kerning, weight, tilt, wrap) are
+                // handled via VsfType::rot + render_loom, not the imperative {dt} path.
+                use crate::drawing::TextSettings;
+
+                let top = self.pop()?;
+                let (colour, settings) = match top {
+                    VsfType::u3(a) => {
+                        let mut s = TextSettings::default();
+                        s.align = a;
+                        (self.pop()?, s)
+                    }
+                    other => (other, TextSettings::default()),
                 };
-                let colour = self.pop()?;
+
                 let text = match self.pop()? {
                     VsfType::x(s) | VsfType::l(s) => s,
                     other => return Err(format!("draw_text: expected string for text, got {:?}", other)),
@@ -632,7 +641,7 @@ impl VM {
                     size,
                     &text,
                     &colour,
-                    align,
+                    &settings,
                 )?;
             }
 
@@ -692,6 +701,67 @@ impl VM {
                 {
                     println!("{}", debug_str);
                 }
+            }
+
+            Opcode::local_alloc => {
+                // Immediate: u count — extend current frame with N default slots
+                let n = match vsf_parse(&self.bytecode, &mut self.ip)
+                    .map_err(|e| format!("local_alloc: {}", e))? {
+                    VsfType::u3(n) => n as usize,
+                    VsfType::u(n, _) => n,
+                    other => return Err(format!("local_alloc: expected u, got {:?}", other)),
+                };
+                let frame = self.locals.last_mut().unwrap();
+                frame.resize(frame.len() + n, VsfType::u3(0));
+            }
+
+            Opcode::local_get => {
+                // Immediate: u index — push locals[index] (clone)
+                let idx = match vsf_parse(&self.bytecode, &mut self.ip)
+                    .map_err(|e| format!("local_get: {}", e))? {
+                    VsfType::u3(i) => i as usize,
+                    VsfType::u(i, _) => i,
+                    other => return Err(format!("local_get: expected u, got {:?}", other)),
+                };
+                let frame = self.locals.last().unwrap();
+                if idx >= frame.len() {
+                    return Err(format!("local_get: index {} out of bounds ({})", idx, frame.len()));
+                }
+                self.stack.push(frame[idx].clone());
+            }
+
+            Opcode::local_set => {
+                // Immediate: u index — pop value from stack, store in locals[index]
+                let idx = match vsf_parse(&self.bytecode, &mut self.ip)
+                    .map_err(|e| format!("local_set: {}", e))? {
+                    VsfType::u3(i) => i as usize,
+                    VsfType::u(i, _) => i,
+                    other => return Err(format!("local_set: expected u, got {:?}", other)),
+                };
+                let val = self.pop()?;
+                let frame = self.locals.last_mut().unwrap();
+                if idx >= frame.len() {
+                    return Err(format!("local_set: index {} out of bounds ({})", idx, frame.len()));
+                }
+                frame[idx] = val;
+            }
+
+            Opcode::local_tee => {
+                // Immediate: u index — copy top of stack to locals[index] without popping
+                let idx = match vsf_parse(&self.bytecode, &mut self.ip)
+                    .map_err(|e| format!("local_tee: {}", e))? {
+                    VsfType::u3(i) => i as usize,
+                    VsfType::u(i, _) => i,
+                    other => return Err(format!("local_tee: expected u, got {:?}", other)),
+                };
+                let val = self.stack.last()
+                    .ok_or("local_tee: stack empty")?
+                    .clone();
+                let frame = self.locals.last_mut().unwrap();
+                if idx >= frame.len() {
+                    return Err(format!("local_tee: index {} out of bounds ({})", idx, frame.len()));
+                }
+                frame[idx] = val;
             }
 
             _ => {
