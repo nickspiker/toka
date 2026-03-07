@@ -1,4 +1,6 @@
 //! Text rendering for CanvasQuality using fontdue-spirix Layout engine
+//!
+//! Same alignment semantics as text_fast — see that module for details.
 
 use crate::drawing::canvas_quality::{CanvasQuality, Pixel};
 use crate::drawing::shared::TextSettings;
@@ -9,8 +11,6 @@ use spirix::{CircleF4E4, ScalarF4E4};
 
 impl CanvasQuality {
     /// Draw text onto the canvas using fontdue's Layout engine.
-    ///
-    /// Layout handles kerning, line wrapping, alignment, and line height.
     pub fn draw_text(
         &mut self,
         font_cache: &mut FontCache,
@@ -24,8 +24,6 @@ impl CanvasQuality {
     ) {
         let cache_key = settings.font_cache_key(font_key);
         let font = font_cache.entry(cache_key).or_insert_with(|| {
-            // TODO: when weight/tilt is set, apply set_variation() on the
-            // ttf-parser Face before constructing the fontdue Font.
             FontdueFont::from_bytes(font_bytes, fontdue::FontSettings::default())
                 .expect("draw_text: invalid font bytes")
         });
@@ -38,6 +36,12 @@ impl CanvasQuality {
         let canvas_w = self.width() as isize;
         let canvas_h = self.height() as isize;
 
+        // Offset y so the anchor means "baseline" instead of "top of layout box".
+        let ascent = font.horizontal_line_metrics(px)
+            .map(|m| m.ascent)
+            .unwrap_or(px);
+        let baseline_y = anchor_y - ascent;
+
         let h_align = match settings.align {
             1 => HorizontalAlign::Left,
             2 => HorizontalAlign::Right,
@@ -46,33 +50,50 @@ impl CanvasQuality {
 
         let wrap_px = settings.wrap.map(|w| w * self.span() * self.ru());
 
-        // Lay out left-to-right from anchor. We'll shift glyphs for center/right after.
+        // Compute layout origin x based on alignment + wrap
+        let anchor_x_s = ScalarF4E4::from(anchor_x);
+        let (layout_x, use_fontdue_align) = if let Some(w) = wrap_px {
+            let x = match settings.align {
+                1 => anchor_x_s,
+                2 => anchor_x_s - w,
+                _ => anchor_x_s - (w >> 1usize),
+            };
+            (x, true)
+        } else {
+            (anchor_x_s, false)
+        };
+
         let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
         let layout_settings = LayoutSettings {
-            x: ScalarF4E4::from(anchor_x as i32),
-            y: ScalarF4E4::from(anchor_y as i32),
+            x: layout_x,
+            y: baseline_y,
             max_width: wrap_px,
-            horizontal_align: HorizontalAlign::Left,
+            horizontal_align: if use_fontdue_align { h_align } else { HorizontalAlign::Left },
             line_height: settings.leading,
             ..LayoutSettings::default()
         };
         layout.reset(&layout_settings);
         layout.append(&[font as &FontdueFont], &TextStyle::new(text, px, 0));
 
-        // For center/right alignment, compute text width and shift glyphs
-        let shift_x = if settings.align == 1 {
+        // Global shift for no-wrap center/right alignment
+        let shift_x = if use_fontdue_align || settings.align == 1 {
             ScalarF4E4::ZERO
         } else {
             let glyphs = layout.glyphs();
             if glyphs.is_empty() {
                 ScalarF4E4::ZERO
             } else {
-                let first_x = glyphs[0].x;
-                let last = &glyphs[glyphs.len() - 1];
-                let text_w = last.x + ScalarF4E4::from(last.width as i32) - first_x;
+                let mut min_x = glyphs[0].x;
+                let mut max_x = glyphs[0].x + glyphs[0].width;
+                for g in glyphs.iter().skip(1) {
+                    if g.x < min_x { min_x = g.x; }
+                    let end = g.x + g.width;
+                    if end > max_x { max_x = end; }
+                }
+                let w = max_x - min_x;
                 match settings.align {
-                    2 => -text_w,
-                    _ => -(text_w >> 1usize),
+                    2 => -w,
+                    _ => -(w >> 1usize),
                 }
             }
         };
@@ -99,7 +120,7 @@ impl CanvasQuality {
                 for col in col_start..col_end {
                     let coverage = bitmap[(row_offset + col) as usize];
                     if coverage == 0 { continue; }
-                    let alpha = ScalarF4E4::from(coverage as i32) >> 8usize;
+                    let alpha = ScalarF4E4::from(coverage) >> 8usize;
                     let inv = ScalarF4E4::ONE - alpha;
                     let idx = py * canvas_w as usize + (gx + col) as usize;
                     let bg = self.pixels_mut()[idx];
@@ -114,3 +135,4 @@ impl CanvasQuality {
         }
     }
 }
+

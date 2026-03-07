@@ -162,6 +162,21 @@ impl CanvasQuality {
         self.height
     }
 
+    /// Create a transparent layer canvas matching dimensions and RU state
+    pub fn new_layer(width: usize, height: usize, ru: ScalarF4E4) -> Self {
+        let transparent: Pixel = [ScalarF4E4::ZERO; 4];
+        let mut layer = Self {
+            width,
+            height,
+            span: ScalarF4E4::from(width * height) / (width + height),
+            ru: ScalarF4E4::ONE,
+            half_dims: CircleF4E4::from((width, height)) >> 1,
+            pixels: vec![transparent; width * height],
+        };
+        layer.set_ru(ru);
+        layer
+    }
+
     /// Convert canvas pixels to RGBA byte array for browser ImageData
     ///
     /// Pipeline per pixel:

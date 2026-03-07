@@ -526,7 +526,6 @@ impl VM {
             }
 
             // ==================== SCENE GRAPH CONSTRUCTION ====================
-
             Opcode::build_row => {
                 // Build row: pop children (ron), rotate (s44), translate (c44)
                 // Stack: [..., translate_c44, rotate_s44, children_ron]
@@ -540,7 +539,12 @@ impl VM {
                 // Extract children from ron node
                 let children = match children_vsf {
                     VsfType::ron(_, _, children_vec) => children_vec,
-                    _ => return Err(format!("build_row: expected ron for children, got {:?}", type_name(&children_vsf))),
+                    _ => {
+                        return Err(format!(
+                            "build_row: expected ron for children, got {:?}",
+                            type_name(&children_vsf)
+                        ))
+                    }
                 };
 
                 let transform = vsf::types::Transform {
@@ -567,13 +571,19 @@ impl VM {
                 // Extract children from ron node
                 let children = match children_vsf {
                     VsfType::ron(_, _, children_vec) => children_vec,
-                    _ => return Err(format!("build_rob: expected ron for children, got {:?}", type_name(&children_vsf))),
+                    _ => {
+                        return Err(format!(
+                            "build_rob: expected ron for children, got {:?}",
+                            type_name(&children_vsf)
+                        ))
+                    }
                 };
 
                 // Build simple solid fill from colour
                 let fill = vsf::types::Fill::Solid(Box::new(fill_vsf));
 
-                self.stack.push(VsfType::rob(pos, size, fill, None, children));
+                self.stack
+                    .push(VsfType::rob(pos, size, fill, None, children));
             }
 
             Opcode::build_roc => {
@@ -598,39 +608,135 @@ impl VM {
             }
 
             // ==================== LOOM LAYOUT ====================
-
             Opcode::draw_text => {
-                // Stack (bottom→top): font_bytes, pos (c44), size (s44), text, colour[, align (u3)]
-                // align: 0=center (default), 1=left, 2=right — optional, defaults to 0
-                // Full TextStyle modifiers (leading, kerning, weight, tilt, wrap) are
-                // handled via VsfType::rot + render_loom, not the imperative {dt} path.
+                // Stack (bottom→top): font_bytes, pos (c44), size (s44), text, colour [, settings tags]
+                // Settings tags (parsed from top of stack, same pattern as draw_line):
+                //   l("l")       = left-align (flag)
+                //   l("r")       = right-align (flag)
+                //   l("e") + s44 = leading (line height multiplier)
+                //   l("k") + s44 = kerning (letter spacing in RU)
+                //   l("w") + s44 = weight (variable font axis, 100-900)
+                //   l("i") + s44 = tilt (italic angle in degrees)
+                //   l("x") + s44 = wrap width in RU
+                // Legacy: u3 align value (0=center, 1=left, 2=right) still accepted
                 use crate::drawing::TextSettings;
 
-                let top = self.pop()?;
-                let (colour, settings) = match top {
-                    VsfType::u3(a) => {
-                        let mut s = TextSettings::default();
-                        s.align = a;
-                        (self.pop()?, s)
+                let mut settings = TextSettings::default();
+                let mut next = self.pop()?;
+
+                // Parse optional modifier tags from top of stack
+                loop {
+                    match &next {
+                        VsfType::l(tag) => match tag.as_str() {
+                            "l" => {
+                                settings.align = 1;
+                                next = self.pop()?;
+                            }
+                            "r" => {
+                                settings.align = 2;
+                                next = self.pop()?;
+                            }
+                            "e" => {
+                                match self.pop()? {
+                                    VsfType::s44(v) => settings.leading = v,
+                                    other => {
+                                        return Err(format!(
+                                            "draw_text: 'e' tag expected s44, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "k" => {
+                                match self.pop()? {
+                                    VsfType::s44(v) => settings.kerning = v,
+                                    other => {
+                                        return Err(format!(
+                                            "draw_text: 'k' tag expected s44, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "w" => {
+                                match self.pop()? {
+                                    VsfType::s44(v) => settings.weight = Some(v),
+                                    other => {
+                                        return Err(format!(
+                                            "draw_text: 'w' tag expected s44, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "i" => {
+                                match self.pop()? {
+                                    VsfType::s44(v) => settings.tilt = Some(v),
+                                    other => {
+                                        return Err(format!(
+                                            "draw_text: 'i' tag expected s44, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "x" => {
+                                match self.pop()? {
+                                    VsfType::s44(v) => settings.wrap = Some(v),
+                                    other => {
+                                        return Err(format!(
+                                            "draw_text: 'x' tag expected s44, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            _ => break,
+                        },
+                        VsfType::u3(a) => {
+                            // Legacy: u3 alignment value
+                            settings.align = *a;
+                            next = self.pop()?;
+                        }
+                        _ => break,
                     }
-                    other => (other, TextSettings::default()),
-                };
+                }
+                let colour = next;
 
                 let text = match self.pop()? {
                     VsfType::x(s) | VsfType::l(s) => s,
-                    other => return Err(format!("draw_text: expected string for text, got {:?}", other)),
+                    other => {
+                        return Err(format!(
+                            "draw_text: expected string for text, got {:?}",
+                            other
+                        ))
+                    }
                 };
                 let size = match self.pop()? {
                     VsfType::s44(s) => s,
-                    other => return Err(format!("draw_text: expected s44 for size, got {:?}", other)),
+                    other => {
+                        return Err(format!("draw_text: expected s44 for size, got {:?}", other))
+                    }
                 };
                 let pos = match self.pop()? {
                     VsfType::c44(c) => c,
-                    other => return Err(format!("draw_text: expected c44 for pos, got {:?}", other)),
+                    other => {
+                        return Err(format!("draw_text: expected c44 for pos, got {:?}", other))
+                    }
                 };
                 let font_bytes = match self.pop()? {
                     VsfType::v(b'b', bytes) => bytes,
-                    other => return Err(format!("draw_text: expected binary blob for font, got {:?}", other)),
+                    other => {
+                        return Err(format!(
+                            "draw_text: expected binary blob for font, got {:?}",
+                            other
+                        ))
+                    }
                 };
                 let font_key = *blake3::hash(&font_bytes).as_bytes();
                 self.canvas.draw_text(
@@ -645,6 +751,518 @@ impl VM {
                 )?;
             }
 
+            Opcode::draw_line => {
+                // Stack (bottom→top): start (c44), end (c44), colour [, settings tags]
+                // Settings tags are parsed from top of stack before colour:
+                //   l("w") + s44 = weight
+                //   l("c") + u3  = cap (both endpoints)
+                //   l("s") + u3  = start cap override
+                //   l("e") + u3  = end cap override
+                //   l("p")       = pixel mode
+                use crate::drawing::shared::Cap;
+                use crate::drawing::LineSettings;
+
+                let mut settings = LineSettings::default();
+                let mut next = self.pop()?;
+
+                // Parse optional modifier tags from top of stack
+                loop {
+                    match &next {
+                        VsfType::l(tag) => match tag.as_str() {
+                            "w" => {
+                                match self.pop()? {
+                                    VsfType::s44(w) => settings.weight = Some(w),
+                                    other => {
+                                        return Err(format!(
+                                            "draw_line: 'w' tag expected s44, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "c" => {
+                                // Set both caps at once
+                                match self.pop()? {
+                                    VsfType::u3(c) => {
+                                        let cap = Cap::from_u8(c);
+                                        settings.cap_start = cap;
+                                        settings.cap_end = cap;
+                                    }
+                                    other => {
+                                        return Err(format!(
+                                            "draw_line: 'c' tag expected u3, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "s" => {
+                                match self.pop()? {
+                                    VsfType::u3(c) => settings.cap_start = Cap::from_u8(c),
+                                    other => {
+                                        return Err(format!(
+                                            "draw_line: 's' tag expected u3, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "e" => {
+                                match self.pop()? {
+                                    VsfType::u3(c) => settings.cap_end = Cap::from_u8(c),
+                                    other => {
+                                        return Err(format!(
+                                            "draw_line: 'e' tag expected u3, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "p" => {
+                                settings.pixel = true;
+                                next = self.pop()?;
+                            }
+                            _ => break,
+                        },
+                        _ => break,
+                    }
+                }
+
+                let colour = next;
+                let end = match self.pop()? {
+                    VsfType::c44(c) => c,
+                    other => {
+                        return Err(format!(
+                            "draw_line: expected c44 for end point, got {:?}",
+                            other
+                        ))
+                    }
+                };
+                let start = match self.pop()? {
+                    VsfType::c44(c) => c,
+                    other => {
+                        return Err(format!(
+                            "draw_line: expected c44 for start point, got {:?}",
+                            other
+                        ))
+                    }
+                };
+
+                self.canvas.draw_line(start, end, &colour, &settings)?;
+            }
+
+            Opcode::draw_table => {
+                // Same base stack as draw_text: font_bytes, pos(c44), size(s44), colour
+                // All table-specific data via tags:
+                //   l("c") + u   = column count
+                //   l("r") + u   = row count
+                //   l("d")       = cell data marker (next cols*rows stack values are cell strings)
+                //   l("w") + s44 = table width in RU
+                //   l("h") + col = header row background colour
+                //   l("b") + col = border/grid colour
+                //   l("a") + col = alternating row background colour
+                //   l("p") + s44 = cell padding in RU
+                use crate::drawing::TableSettings;
+                use fontdue::Font as FontdueFont;
+
+                let mut settings = TableSettings::default();
+                let mut cols: usize = 0;
+                let mut rows: usize = 0;
+                let mut cells: Vec<String> = Vec::new();
+                let mut next = self.pop()?;
+
+                loop {
+                    match &next {
+                        VsfType::l(tag) => match tag.as_str() {
+                            "c" => {
+                                cols = match self.pop()? {
+                                    VsfType::u(n, _) => n,
+                                    VsfType::u3(n) => n as usize,
+                                    other => {
+                                        return Err(format!(
+                                            "draw_table: 'c' tag expected u, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                };
+                                next = self.pop()?;
+                            }
+                            "r" => {
+                                rows = match self.pop()? {
+                                    VsfType::u(n, _) => n,
+                                    VsfType::u3(n) => n as usize,
+                                    other => {
+                                        return Err(format!(
+                                            "draw_table: 'r' tag expected u, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                };
+                                next = self.pop()?;
+                            }
+                            "d" => {
+                                // Pop cols*rows cell strings from stack
+                                let count = cols * rows;
+                                if count == 0 {
+                                    return Err(
+                                        "draw_table: 'd' tag requires 'c' and 'r' tags first"
+                                            .to_string(),
+                                    );
+                                }
+                                cells = Vec::with_capacity(count);
+                                for _ in 0..count {
+                                    let cell =
+                                        match self.pop()? {
+                                            VsfType::x(s) | VsfType::l(s) => s,
+                                            other => return Err(format!(
+                                                "draw_table: expected string for cell, got {:?}",
+                                                other
+                                            )),
+                                        };
+                                    cells.push(cell);
+                                }
+                                cells.reverse(); // LIFO → row-major order
+                                next = self.pop()?;
+                            }
+                            "x" => {
+                                if cols == 0 {
+                                    return Err("draw_table: 'x' tag requires 'c' tag first".to_string());
+                                }
+                                let mut widths = Vec::with_capacity(cols);
+                                for _ in 0..cols {
+                                    match self.pop()? {
+                                        VsfType::s44(v) => widths.push(v),
+                                        other => {
+                                            return Err(format!(
+                                                "draw_table: 'x' tag expected s44, got {:?}",
+                                                other
+                                            ))
+                                        }
+                                    }
+                                }
+                                widths.reverse(); // LIFO → column order
+                                settings.col_widths = Some(widths);
+                                next = self.pop()?;
+                            }
+                            "y" => {
+                                match self.pop()? {
+                                    VsfType::s44(v) => settings.row_height = Some(v),
+                                    other => {
+                                        return Err(format!(
+                                            "draw_table: 'y' tag expected s44, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "h" => {
+                                settings.header_bg = Some(self.pop()?);
+                                next = self.pop()?;
+                            }
+                            "b" => {
+                                settings.border_colour = Some(self.pop()?);
+                                next = self.pop()?;
+                            }
+                            "a" => {
+                                settings.alt_row_bg = Some(self.pop()?);
+                                next = self.pop()?;
+                            }
+                            "p" => {
+                                match self.pop()? {
+                                    VsfType::s44(v) => settings.padding = v,
+                                    other => {
+                                        return Err(format!(
+                                            "draw_table: 'p' tag expected s44, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "j" => {
+                                match self.pop()? {
+                                    VsfType::x(s) | VsfType::l(s) => settings.h_align = Some(s.into_bytes()),
+                                    other => {
+                                        return Err(format!(
+                                            "draw_table: 'j' tag expected string, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            "v" => {
+                                match self.pop()? {
+                                    VsfType::x(s) | VsfType::l(s) => settings.v_align = Some(s.into_bytes()),
+                                    other => {
+                                        return Err(format!(
+                                            "draw_table: 'v' tag expected string, got {:?}",
+                                            other
+                                        ))
+                                    }
+                                }
+                                next = self.pop()?;
+                            }
+                            _ => break,
+                        },
+                        _ => break,
+                    }
+                }
+
+                if cols == 0 || rows == 0 || cells.is_empty() {
+                    return Err("draw_table: requires 'c', 'r', and 'd' tags".to_string());
+                }
+
+                let text_colour = next;
+                let size = match self.pop()? {
+                    VsfType::s44(s) => s,
+                    other => {
+                        return Err(format!(
+                            "draw_table: expected s44 for size, got {:?}",
+                            other
+                        ))
+                    }
+                };
+                let pos = match self.pop()? {
+                    VsfType::c44(c) => c,
+                    other => {
+                        return Err(format!("draw_table: expected c44 for pos, got {:?}", other))
+                    }
+                };
+                let font_bytes = match self.pop()? {
+                    VsfType::v(b'b', bytes) => bytes,
+                    other => {
+                        return Err(format!(
+                            "draw_table: expected binary blob for font, got {:?}",
+                            other
+                        ))
+                    }
+                };
+                let font_key = *blake3::hash(&font_bytes).as_bytes();
+
+                // Get font metrics for row height
+                let font = self.font_cache.entry(font_key).or_insert_with(|| {
+                    FontdueFont::from_bytes(font_bytes.as_slice(), fontdue::FontSettings::default())
+                        .expect("draw_table: invalid font bytes")
+                });
+                let px = size * self.canvas.span() * self.canvas.ru();
+                let metrics = font.horizontal_line_metrics(px);
+                let ascent = metrics.map(|m| m.ascent).unwrap_or(px);
+                let descent = metrics.map(|m| m.descent).unwrap_or(ScalarF4E4::ZERO);
+                let span_ru = self.canvas.span() * self.canvas.ru();
+
+                use fontdue::layout::{CoordinateSystem, Layout, LayoutSettings, TextStyle};
+
+
+
+                // Column widths: explicit (x tag) or auto-fit to content
+                let col_widths: Vec<ScalarF4E4> = if let Some(ref ws) = settings.col_widths {
+                    // Explicit: each value is the width. 0 = hidden.
+                    ws.clone()
+                } else {
+                    // Auto-fit: measure widest text per column
+                    let mut max_widths = vec![ScalarF4E4::ZERO; cols];
+                    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+                    for col in 0..cols {
+                        for row in 0..rows {
+                            let cell_text = &cells[row * cols + col];
+                            layout.reset(&LayoutSettings::default());
+                            layout.append(&[font as &FontdueFont], &TextStyle::new(cell_text, px, 0));
+                            let glyphs = layout.glyphs();
+                            if !glyphs.is_empty() {
+                                let last = &glyphs[glyphs.len() - 1];
+                                let text_w = last.x - glyphs[0].x + last.width;
+                                if text_w > max_widths[col] { max_widths[col] = text_w; }
+                            }
+                        }
+                    }
+                    let pad2 = settings.padding << 1usize;
+                    max_widths.iter().map(|w| *w / span_ru + pad2).collect()
+                };
+                let table_width: ScalarF4E4 = col_widths.iter().copied()
+                    .fold(ScalarF4E4::ZERO, |a, b| a + b);
+
+                let table_left = pos.r() - (table_width >> 1usize);
+
+                // Compute column left edges
+                let mut col_lefts = Vec::with_capacity(cols + 1);
+                col_lefts.push(table_left);
+                for col in 0..cols {
+                    col_lefts.push(col_lefts[col] + col_widths[col]);
+                }
+
+                // Per-cell text block height (RU) and per-row heights
+                let single_line_text_h = (ascent - descent) / span_ru;
+                let single_line_ru = {
+                    let line_size = metrics.map(|m| m.new_line_size).unwrap_or(px);
+                    line_size / span_ru + (settings.padding << 1usize)
+                };
+                let canvas_h_px = ScalarF4E4::from(self.canvas.height());
+                let mut cell_text_heights = vec![single_line_text_h; rows * cols];
+                let row_heights: Vec<ScalarF4E4> = if let Some(rh) = settings.row_height {
+                    vec![rh; rows]
+                } else if settings.col_widths.is_some() {
+                    // Measure wrapped text height per cell, take max per row
+                    let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+                    let mut heights = Vec::with_capacity(rows);
+                    for row in 0..rows {
+                        let mut max_h = single_line_ru;
+                        for col in 0..cols {
+                            let cw = col_widths[col];
+                            if !cw.is_positive() { continue; } // hidden column
+                            let cell_text = &cells[row * cols + col];
+                            let wrap_px = cw * span_ru - (settings.padding << 1usize) * span_ru;
+                            if !wrap_px.is_positive() { continue; } // too narrow
+                            layout.reset(&LayoutSettings {
+                                max_width: Some(wrap_px),
+                                line_height: ScalarF4E4::ONE,
+                                ..LayoutSettings::default()
+                            });
+                            layout.append(&[font as &FontdueFont], &TextStyle::new(cell_text, px, 0));
+                            let glyphs = layout.glyphs();
+                            if !glyphs.is_empty() {
+                                let last = &glyphs[glyphs.len() - 1];
+                                let text_bottom = last.y + last.height;
+                                // Too-narrow check: if text overflows canvas, skip it
+                                if text_bottom > canvas_h_px { continue; }
+                                cell_text_heights[row * cols + col] = text_bottom / span_ru;
+                                let cell_h = text_bottom / span_ru + (settings.padding << 1usize);
+                                if cell_h > max_h { max_h = cell_h; }
+                            }
+                        }
+                        heights.push(max_h);
+                    }
+                    heights
+                } else {
+                    vec![single_line_ru; rows]
+                };
+
+                // Compute cumulative row Y offsets
+                let mut row_tops = Vec::with_capacity(rows + 1);
+                row_tops.push(pos.i());
+                for row in 0..rows {
+                    row_tops.push(row_tops[row] + row_heights[row]);
+                }
+
+                // Vertical alignment helper (px → RU)
+                let ascent_ru = ascent / span_ru;
+
+                // Draw backgrounds
+                for row in 0..rows {
+                    let rh = row_heights[row];
+                    let row_pos = CircleF4E4::from((pos.r(), row_tops[row] + (rh >> 1usize)));
+                    let row_size = CircleF4E4::from((table_width, rh));
+
+                    if row == 0 {
+                        if let Some(ref bg) = settings.header_bg {
+                            self.canvas.fill_rect_ru(row_pos, row_size, bg)?;
+                        }
+                    } else if row % 2 == 0 {
+                        if let Some(ref bg) = settings.alt_row_bg {
+                            self.canvas.fill_rect_ru(row_pos, row_size, bg)?;
+                        }
+                    }
+                }
+
+                // Draw grid lines
+                if let Some(ref border) = settings.border_colour {
+                    let line_settings = crate::drawing::LineSettings::default();
+                    let table_right = table_left + table_width;
+                    let table_top = pos.i();
+                    let table_bottom = row_tops[rows];
+
+                    for row in 0..=rows {
+                        self.canvas.draw_line(
+                            CircleF4E4::from((table_left, row_tops[row])),
+                            CircleF4E4::from((table_right, row_tops[row])),
+                            border,
+                            &line_settings,
+                        )?;
+                    }
+                    for col in 0..=cols {
+                        let x = col_lefts[col];
+                        self.canvas.draw_line(
+                            CircleF4E4::from((x, table_top)),
+                            CircleF4E4::from((x, table_bottom)),
+                            border,
+                            &line_settings,
+                        )?;
+                    }
+                }
+
+                // Draw cell text with per-column alignment
+                for row in 0..rows {
+                    let rh = row_heights[row];
+                    for col in 0..cols {
+                        // Skip hidden columns (width 0)
+                        if !col_widths[col].is_positive() { continue; }
+
+                        let cell_idx = row * cols + col;
+                        let cell_text = &cells[cell_idx];
+
+                        // Skip if text couldn't fit (too-narrow check set single_line_text_h)
+                        let text_h = cell_text_heights[cell_idx];
+
+                        // Per-column horizontal justify (default: center)
+                        let h = settings.h_align.as_ref()
+                            .and_then(|a| a.get(col).copied())
+                            .unwrap_or(b'c');
+                        let align = match h {
+                            b'l' => 1,
+                            b'r' => 2,
+                            _ => 0,
+                        };
+
+                        let cell_x = match h {
+                            b'l' => col_lefts[col] + settings.padding,
+                            b'r' => col_lefts[col + 1] - settings.padding,
+                            _ => col_lefts[col] + (col_widths[col] >> 1usize),
+                        };
+
+                        // Per-column vertical alignment (default: middle)
+                        let v = settings.v_align.as_ref()
+                            .and_then(|a| a.get(col).copied())
+                            .unwrap_or(b'm');
+                        let rt = row_tops[row];
+                        let cell_y = match v {
+                            b't' => rt + settings.padding + ascent_ru,
+                            b'b' => rt + rh - settings.padding - text_h + ascent_ru,
+                            _ => rt + (rh >> 1usize) + ascent_ru - (text_h >> 1usize),
+                        };
+
+                        let cell_pos = CircleF4E4::from((cell_x, cell_y));
+                        // Wrap text in explicit-width columns
+                        let wrap = if settings.col_widths.is_some() {
+                            let w = col_widths[col] - (settings.padding << 1usize);
+                            if w.is_positive() { Some(w) } else { None }
+                        } else {
+                            None
+                        };
+                        let text_settings = crate::drawing::TextSettings {
+                            align,
+                            wrap,
+                            ..Default::default()
+                        };
+
+                        self.canvas.draw_text(
+                            &mut self.font_cache,
+                            font_key,
+                            &font_bytes,
+                            cell_pos,
+                            size,
+                            cell_text,
+                            &text_colour,
+                            &text_settings,
+                        )?;
+                    }
+                }
+            }
+
             Opcode::clear_canvas => {
                 // Pop VSF colour type (rc*, ra, or rw)
                 let colour = self.pop()?;
@@ -653,7 +1271,9 @@ impl VM {
 
             Opcode::render_loom => {
                 // Pop scene graph from stack (ro* type)
-                let vsf = self.stack.pop()
+                let vsf = self
+                    .stack
+                    .pop()
                     .ok_or_else(|| "render_loom: stack underflow".to_string())?;
 
                 // Render directly from ro* type
@@ -706,7 +1326,8 @@ impl VM {
             Opcode::local_alloc => {
                 // Immediate: u count — extend current frame with N default slots
                 let n = match vsf_parse(&self.bytecode, &mut self.ip)
-                    .map_err(|e| format!("local_alloc: {}", e))? {
+                    .map_err(|e| format!("local_alloc: {}", e))?
+                {
                     VsfType::u3(n) => n as usize,
                     VsfType::u(n, _) => n,
                     other => return Err(format!("local_alloc: expected u, got {:?}", other)),
@@ -718,14 +1339,19 @@ impl VM {
             Opcode::local_get => {
                 // Immediate: u index — push locals[index] (clone)
                 let idx = match vsf_parse(&self.bytecode, &mut self.ip)
-                    .map_err(|e| format!("local_get: {}", e))? {
+                    .map_err(|e| format!("local_get: {}", e))?
+                {
                     VsfType::u3(i) => i as usize,
                     VsfType::u(i, _) => i,
                     other => return Err(format!("local_get: expected u, got {:?}", other)),
                 };
                 let frame = self.locals.last().unwrap();
                 if idx >= frame.len() {
-                    return Err(format!("local_get: index {} out of bounds ({})", idx, frame.len()));
+                    return Err(format!(
+                        "local_get: index {} out of bounds ({})",
+                        idx,
+                        frame.len()
+                    ));
                 }
                 self.stack.push(frame[idx].clone());
             }
@@ -733,7 +1359,8 @@ impl VM {
             Opcode::local_set => {
                 // Immediate: u index — pop value from stack, store in locals[index]
                 let idx = match vsf_parse(&self.bytecode, &mut self.ip)
-                    .map_err(|e| format!("local_set: {}", e))? {
+                    .map_err(|e| format!("local_set: {}", e))?
+                {
                     VsfType::u3(i) => i as usize,
                     VsfType::u(i, _) => i,
                     other => return Err(format!("local_set: expected u, got {:?}", other)),
@@ -741,7 +1368,11 @@ impl VM {
                 let val = self.pop()?;
                 let frame = self.locals.last_mut().unwrap();
                 if idx >= frame.len() {
-                    return Err(format!("local_set: index {} out of bounds ({})", idx, frame.len()));
+                    return Err(format!(
+                        "local_set: index {} out of bounds ({})",
+                        idx,
+                        frame.len()
+                    ));
                 }
                 frame[idx] = val;
             }
@@ -749,17 +1380,20 @@ impl VM {
             Opcode::local_tee => {
                 // Immediate: u index — copy top of stack to locals[index] without popping
                 let idx = match vsf_parse(&self.bytecode, &mut self.ip)
-                    .map_err(|e| format!("local_tee: {}", e))? {
+                    .map_err(|e| format!("local_tee: {}", e))?
+                {
                     VsfType::u3(i) => i as usize,
                     VsfType::u(i, _) => i,
                     other => return Err(format!("local_tee: expected u, got {:?}", other)),
                 };
-                let val = self.stack.last()
-                    .ok_or("local_tee: stack empty")?
-                    .clone();
+                let val = self.stack.last().ok_or("local_tee: stack empty")?.clone();
                 let frame = self.locals.last_mut().unwrap();
                 if idx >= frame.len() {
-                    return Err(format!("local_tee: index {} out of bounds ({})", idx, frame.len()));
+                    return Err(format!(
+                        "local_tee: index {} out of bounds ({})",
+                        idx,
+                        frame.len()
+                    ));
                 }
                 frame[idx] = val;
             }
@@ -1218,7 +1852,6 @@ impl VM {
         }
     }
 
-
     /// Peek at top of stack without popping
     pub fn peek(&self) -> Option<&VsfType> {
         self.stack.last()
@@ -1436,7 +2069,7 @@ mod tests {
         vm.run().unwrap();
         assert_eq!(vm.stack_depth(), 1);
         match vm.peek().unwrap() {
-            VsfType::s44(s) => assert_eq!(*s, ScalarF4E4::from(5)),
+            VsfType::s44(s) => assert_eq!(*s, (5)),
             _ => panic!("Expected s44"),
         }
     }

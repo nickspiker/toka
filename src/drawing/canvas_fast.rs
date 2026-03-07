@@ -8,7 +8,7 @@
 //!
 //! Pixel format: R<<24 | G<<16 | B<<8 | A
 
-use crate::drawing::shared::RuCoords;
+use crate::drawing::shared::{BlendMode, RuCoords};
 use spirix::{CircleF4E4, ScalarF4E4};
 
 /// Opaque black in packed u32 sRGB (R=0, G=0, B=0, A=255)
@@ -114,7 +114,7 @@ impl CanvasFast {
         out as u32
     }
 
-    /// Blend fg over bg using provided inverse alpha
+    /// Blend fg over bg using provided alpha
     #[inline]
     pub(crate) fn blend(fg: u32, bg: u32, alpha: u8) -> u32 {
         let mut b = bg as u64;
@@ -131,5 +131,102 @@ impl CanvasFast {
         out = out | (out >> 16) | 0xFF;
 
         out as u32
+    }
+
+    /// Apply a blend mode per-channel then alpha-composite the result.
+    ///
+    /// Unpacks to i16 intermediates for headroom (Add can exceed 255,
+    /// Subtract can go negative). Saturates to 0..255 on repack.
+    #[inline]
+    pub(crate) fn blend_mode(src: u32, dst: u32, alpha: u8, mode: BlendMode) -> u32 {
+        use BlendMode::*;
+        if matches!(mode, Normal) {
+            return Self::blend(src, dst, alpha);
+        }
+
+        let sr = (src >> 24) as i16;
+        let sg = ((src >> 16) & 0xFF) as i16;
+        let sb = ((src >> 8) & 0xFF) as i16;
+
+        let dr = (dst >> 24) as i16;
+        let dg = ((dst >> 16) & 0xFF) as i16;
+        let db = ((dst >> 8) & 0xFF) as i16;
+
+        let blend_ch = |s: i16, d: i16| -> i16 {
+            match mode {
+                Normal => s,
+                Multiply => (s * d) >> 8,
+                Screen => s + d - ((s * d) >> 8),
+                Overlay => {
+                    if d < 128 { (s * d) >> 7 }
+                    else { 255 - (((255 - s) * (255 - d)) >> 7) }
+                }
+                Darken => s.min(d),
+                Lighten => s.max(d),
+                ColorDodge => {
+                    if s >= 255 { 255 } else { ((d << 8) / (256 - s)).min(255) }
+                }
+                ColorBurn => {
+                    if s <= 0 { 0 } else { 255 - (((255 - d) << 8) / s).min(255) }
+                }
+                HardLight => {
+                    if s < 128 { (s * d) >> 7 }
+                    else { 255 - (((255 - s) * (255 - d)) >> 7) }
+                }
+                SoftLight => {
+                    // Pegtop: (1-2s)·d² + 2s·d  (i32 intermediates to avoid overflow)
+                    let s32 = s as i32;
+                    let d32 = d as i32;
+                    (((255 - 2 * s32) * d32 * d32 / 65025 + 2 * s32 * d32 / 255) as i16).min(255)
+                }
+                Difference => (s - d).abs(),
+                Exclusion => s + d - ((s * d) >> 7),
+                Add => s + d,
+                Subtract => d - s,
+                Divide => {
+                    if s <= 0 { 255 } else { ((d << 8) / s).min(255) }
+                }
+            }
+        };
+
+        let br = blend_ch(sr, dr);
+        let bg = blend_ch(sg, dg);
+        let bb = blend_ch(sb, db);
+
+        // Alpha-composite: out = alpha/255 * blended + (1-alpha/255) * dst
+        let a = alpha as i16;
+        let ia = 255 - a;
+        let mix = |b: i16, d: i16| -> u8 {
+            ((b * a + d * ia + 127) / 255).clamp(0, 255) as u8
+        };
+
+        let da = (dst & 0xFF) as u8;
+        let or = mix(br, dr);
+        let og = mix(bg, dg);
+        let ob = mix(bb, db);
+
+        ((or as u32) << 24) | ((og as u32) << 16) | ((ob as u32) << 8) | (da as u32)
+    }
+
+    /// Create a transparent layer canvas matching this canvas's dimensions and RU state
+    pub fn new_layer(width: usize, height: usize, coords: &RuCoords) -> Self {
+        let mut layer = Self {
+            coords: RuCoords::new(width, height),
+            pixels: vec![0u32; width * height], // fully transparent
+        };
+        layer.coords.set_ru(coords.ru());
+        layer
+    }
+
+    /// Composite a source layer onto this canvas with opacity and blend mode.
+    ///
+    /// Skips fully transparent source pixels (alpha channel == 0).
+    pub fn composite_from(&mut self, src: &CanvasFast, opacity: u8, mode: BlendMode) {
+        for i in 0..self.pixels.len().min(src.pixels.len()) {
+            let s = src.pixels[i];
+            if s & 0xFF == 0 { continue; } // transparent source pixel
+            let a = ((s & 0xFF) as u16 * opacity as u16 / 255) as u8;
+            self.pixels[i] = Self::blend_mode(s, self.pixels[i], a, mode);
+        }
     }
 }

@@ -1,4 +1,14 @@
 //! Text rendering for CanvasFast using fontdue-spirix Layout engine
+//!
+//! Alignment semantics:
+//!   - Anchor point is always the *alignment edge* of the text:
+//!     - Left-aligned:  anchor = left edge of first glyph
+//!     - Center-aligned: anchor = horizontal center of text block
+//!     - Right-aligned: anchor = right edge of last glyph
+//!   - Y anchor is the baseline of the first line
+//!
+//! When wrap width is set, fontdue's built-in per-line alignment is used.
+//! When no wrap, manual per-line shifting handles multi-line text (\n).
 
 use crate::drawing::canvas_fast::CanvasFast;
 use crate::drawing::shared::TextSettings;
@@ -10,7 +20,9 @@ use spirix::{CircleF4E4, ScalarF4E4};
 impl CanvasFast {
     /// Draw text onto the canvas using fontdue's Layout engine.
     ///
-    /// Layout handles kerning, line wrapping, alignment, and line height.
+    /// Alignment is handled differently depending on whether wrapping is enabled:
+    /// - With wrap: fontdue does per-line alignment within the wrap box
+    /// - Without wrap: manual per-line shift after layout
     pub fn draw_text(
         &mut self,
         font_cache: &mut FontCache,
@@ -24,59 +36,103 @@ impl CanvasFast {
     ) {
         let cache_key = settings.font_cache_key(font_key);
         let font = font_cache.entry(cache_key).or_insert_with(|| {
-            // TODO: when weight/tilt is set, apply set_variation() on the
-            // ttf-parser Face before constructing the fontdue Font.
             FontdueFont::from_bytes(font_bytes, fontdue::FontSettings::default())
                 .expect("draw_text: invalid font bytes")
         });
 
         let px = size * self.coords.span * self.coords.ru;
-        if !px.is_positive() { return; }
+        if !px.is_positive() {
+            return;
+        }
 
         let anchor_x = self.ru_to_px_x(pos.r());
         let anchor_y = self.ru_to_px_y(pos.i());
         let canvas_w = self.coords.width as isize;
         let canvas_h = self.coords.height as isize;
 
+        // Offset y so the anchor means "baseline" instead of "top of layout box".
+        // fontdue's layout y is the top of the first line; subtract ascent to convert.
+        let ascent = font
+            .horizontal_line_metrics(px)
+            .map(|m| m.ascent)
+            .unwrap_or(px);
+        let baseline_y = anchor_y - ascent;
+
         let wrap_px = settings.wrap.map(|w| w * self.coords.span * self.coords.ru);
 
-        // Lay out left-to-right from anchor. We'll shift glyphs for center/right after.
+        let h_align = match settings.align {
+            1 => HorizontalAlign::Left,
+            2 => HorizontalAlign::Right,
+            _ => HorizontalAlign::Center,
+        };
+
+        // Compute layout origin x based on alignment + wrap
+        let anchor_x_s = ScalarF4E4::from(anchor_x);
+        let (layout_x, use_fontdue_align) = if let Some(w) = wrap_px {
+            // Wrapping enabled: fontdue handles per-line alignment.
+            // Anchor semantics: left=left edge, center=center of box, right=right edge.
+            let x = match settings.align {
+                1 => anchor_x_s,
+                2 => anchor_x_s - w,
+                _ => anchor_x_s - (w >> 1usize),
+            };
+            (x, true)
+        } else {
+            // No wrapping: lay out left-aligned from anchor, shift manually after.
+            (anchor_x_s, false)
+        };
+
         let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
         let layout_settings = LayoutSettings {
-            x: ScalarF4E4::from(anchor_x as i32),
-            y: ScalarF4E4::from(anchor_y as i32),
+            x: layout_x,
+            y: baseline_y,
             max_width: wrap_px,
-            horizontal_align: HorizontalAlign::Left,
+            horizontal_align: if use_fontdue_align {
+                h_align
+            } else {
+                HorizontalAlign::Left
+            },
             line_height: settings.leading,
             ..LayoutSettings::default()
         };
         layout.reset(&layout_settings);
         layout.append(&[font as &FontdueFont], &TextStyle::new(text, px, 0));
 
-        // For center/right alignment, compute per-line widths and shift glyphs
-        let shift_x = if settings.align == 1 {
-            // Left-aligned: no shift needed
+        // For no-wrap mode: single global shift for center/right alignment.
+        let shift_x = if use_fontdue_align || settings.align == 1 {
             ScalarF4E4::ZERO
         } else {
-            // Measure total text width from glyph positions
             let glyphs = layout.glyphs();
             if glyphs.is_empty() {
                 ScalarF4E4::ZERO
             } else {
-                let first_x = glyphs[0].x;
-                let last = &glyphs[glyphs.len() - 1];
-                let text_w = last.x + ScalarF4E4::from(last.width as i32) - first_x;
+                let mut min_x = glyphs[0].x;
+                let mut max_x = glyphs[0].x + (glyphs[0].width);
+                for g in glyphs.iter().skip(1) {
+                    if g.x < min_x {
+                        min_x = g.x;
+                    }
+                    let end = g.x + (g.width);
+                    if end > max_x {
+                        max_x = end;
+                    }
+                }
+                let w = max_x - min_x;
                 match settings.align {
-                    2 => -text_w,                              // Right: shift left by full width
-                    _ => -(text_w >> 1usize),                  // Center: shift left by half width
+                    2 => -w,             // Right: shift left by full width
+                    _ => -(w >> 1usize), // Center: shift left by half width
                 }
             }
         };
 
         let fonts = [font as &FontdueFont];
         for glyph in layout.glyphs() {
-            if glyph.width == 0 || glyph.height == 0 { continue; }
-            if !glyph.char_data.rasterize() { continue; }
+            if glyph.width == 0 || glyph.height == 0 {
+                continue;
+            }
+            if !glyph.char_data.rasterize() {
+                continue;
+            }
 
             let (metrics, bitmap) = fonts[glyph.font_index].rasterize_config(glyph.key);
             let glyph_w = metrics.width as isize;
@@ -94,7 +150,9 @@ impl CanvasFast {
                 let row_offset = row * glyph_w;
                 for col in col_start..col_end {
                     let coverage = bitmap[(row_offset + col) as usize];
-                    if coverage == 0 { continue; }
+                    if coverage == 0 {
+                        continue;
+                    }
                     let idx = py * canvas_w as usize + (gx + col) as usize;
                     self.pixels[idx] = CanvasFast::blend(colour, self.pixels[idx], coverage);
                 }

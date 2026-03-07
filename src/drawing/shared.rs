@@ -141,3 +141,218 @@ impl TextSettings {
         *hasher.finalize().as_bytes()
     }
 }
+
+/// Table layout settings — parsed from VM stack tags.
+///
+/// Grid structure:
+///   `c` + u    — column count
+///   `r` + u    — row count
+///   `d`        — cell data marker (pops cols×rows strings)
+///
+/// Column widths (shared concept with text `x` wrap width):
+///   `x` + cols×s44 — per-column widths in RU. 0 = hidden. Omit = all auto-fit.
+///
+/// Row height:
+///   `y` + s44 — fixed row height in RU. Omit = auto from font metrics / wrapped content.
+///
+/// Grid visuals:
+///   `h` + colour — header row background colour
+///   `b` + colour — border/grid colour
+///   `a` + colour — alternating row background colour
+///   `p` + s44   — cell padding in RU (default: 0)
+///
+/// Per-column alignment:
+///   `j` + string — horizontal justify per column (`l`/`c`/`r`, default: center)
+///   `v` + string — vertical alignment per column (`t`/`m`/`b`, default: middle)
+pub struct TableSettings {
+    /// `x` — Per-column widths in RU. 0 = hidden. None = all auto-fit.
+    pub col_widths: Option<Vec<ScalarF4E4>>,
+    /// `y` — Fixed row height in RU. None = derive from font metrics.
+    pub row_height: Option<ScalarF4E4>,
+    /// `h` — Header row background (None = no special header bg)
+    pub header_bg: Option<vsf::VsfType>,
+    /// `b` — Border/grid line colour (None = no grid)
+    pub border_colour: Option<vsf::VsfType>,
+    /// `a` — Alternating row background (None = transparent)
+    pub alt_row_bg: Option<vsf::VsfType>,
+    /// `p` — Cell padding in RU
+    pub padding: ScalarF4E4,
+    /// `j` — Per-column horizontal justify (one char per column: l/c/r)
+    pub h_align: Option<Vec<u8>>,
+    /// `v` — Per-column vertical alignment (one char per column: t/m/b)
+    pub v_align: Option<Vec<u8>>,
+}
+
+impl Default for TableSettings {
+    fn default() -> Self {
+        TableSettings {
+            col_widths: None,
+            row_height: None,
+            header_bg: None,
+            border_colour: None,
+            alt_row_bg: None,
+            padding: ScalarF4E4::ZERO,
+            h_align: None,
+            v_align: None,
+        }
+    }
+}
+
+/// Blend mode for layer compositing and per-pixel operations.
+///
+/// All modes operate per-channel on RGB; alpha composited separately.
+/// Quality pipeline: no clamping — values can go negative or above 1.0.
+/// Fast pipeline: saturates to 0..255 (inherent to u8 representation).
+///
+/// Tag shortcodes (single lowercase ASCII, matches VSF convention):
+///   `n` — normal (default, src-over)
+///   `m` — multiply
+///   `s` — screen
+///   `o` — overlay
+///   `d` — darken
+///   `l` — lighten
+///   `g` — color dodge
+///   `b` — color burn
+///   `h` — hard light
+///   `f` — soft light
+///   `i` — difference
+///   `e` — exclusion
+///   `a` — add
+///   `t` — subtract
+///   `v` — divide
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendMode {
+    /// `n` — Porter-Duff src-over (default)
+    Normal,
+    /// `m` — src × dst
+    Multiply,
+    /// `s` — src + dst − src×dst
+    Screen,
+    /// `o` — Multiply if dst dark, Screen if dst light
+    Overlay,
+    /// `d` — min(src, dst)
+    Darken,
+    /// `l` — max(src, dst)
+    Lighten,
+    /// `g` — dst / (1 − src)
+    ColorDodge,
+    /// `b` — 1 − (1 − dst) / src
+    ColorBurn,
+    /// `h` — Overlay with src/dst roles swapped
+    HardLight,
+    /// `f` — Pegtop: (1−2s)·d² + 2s·d
+    SoftLight,
+    /// `i` — |src − dst|
+    Difference,
+    /// `e` — src + dst − 2·src·dst
+    Exclusion,
+    /// `a` — src + dst
+    Add,
+    /// `t` — dst − src
+    Subtract,
+    /// `v` — dst / src
+    Divide,
+}
+
+impl BlendMode {
+    /// Parse from ASCII tag byte (single lowercase letter)
+    pub fn from_tag(v: u8) -> Self {
+        match v {
+            b'm' => BlendMode::Multiply,
+            b's' => BlendMode::Screen,
+            b'o' => BlendMode::Overlay,
+            b'd' => BlendMode::Darken,
+            b'l' => BlendMode::Lighten,
+            b'g' => BlendMode::ColorDodge,
+            b'b' => BlendMode::ColorBurn,
+            b'h' => BlendMode::HardLight,
+            b'f' => BlendMode::SoftLight,
+            b'i' => BlendMode::Difference,
+            b'e' => BlendMode::Exclusion,
+            b'a' => BlendMode::Add,
+            b't' => BlendMode::Subtract,
+            b'v' => BlendMode::Divide,
+            _ => BlendMode::Normal,
+        }
+    }
+
+    /// Convert to ASCII tag byte
+    pub fn to_tag(self) -> u8 {
+        match self {
+            BlendMode::Normal => b'n',
+            BlendMode::Multiply => b'm',
+            BlendMode::Screen => b's',
+            BlendMode::Overlay => b'o',
+            BlendMode::Darken => b'd',
+            BlendMode::Lighten => b'l',
+            BlendMode::ColorDodge => b'g',
+            BlendMode::ColorBurn => b'b',
+            BlendMode::HardLight => b'h',
+            BlendMode::SoftLight => b'f',
+            BlendMode::Difference => b'i',
+            BlendMode::Exclusion => b'e',
+            BlendMode::Add => b'a',
+            BlendMode::Subtract => b't',
+            BlendMode::Divide => b'v',
+        }
+    }
+
+    /// True if this mode is a no-op passthrough (Normal blend)
+    pub fn is_passthrough(&self) -> bool {
+        matches!(self, BlendMode::Normal)
+    }
+}
+
+/// Cap style for line endpoints
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cap {
+    /// Flat end at the endpoint (default)
+    Butt = 0,
+    /// Semicircle extending past the endpoint by half the weight
+    Round = 1,
+    /// Rectangle extending past the endpoint by half the weight
+    Square = 2,
+}
+
+impl Cap {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Cap::Round,
+            2 => Cap::Square,
+            _ => Cap::Butt,
+        }
+    }
+}
+
+/// Line drawing settings — mirrors the tag pattern from TextSettings.
+///
+/// Tags (single lowercase ASCII):
+///   `w` + s44 — stroke weight in RU (None = 1px hairline)
+///   `c` + u3  — cap style for both endpoints: 0=butt, 1=round, 2=square
+///   `s` + u3  — start cap override (if different from end)
+///   `e` + u3  — end cap override (if different from start)
+///   `p`       — pixel mode flag: always 1 device pixel (ignores zoom/resolution)
+///
+/// Defaults: 1px hairline, butt caps, pixel mode off.
+/// Dashes are user-side (bake separate segments in bytecode).
+pub struct LineSettings {
+    /// `w` — Stroke weight in RU. None = 1px hairline (Wu's algorithm).
+    pub weight: Option<ScalarF4E4>,
+    /// `s` — Cap style at start endpoint
+    pub cap_start: Cap,
+    /// `e` — Cap style at end endpoint
+    pub cap_end: Cap,
+    /// `p` — Pixel mode: always exactly 1 device pixel regardless of zoom
+    pub pixel: bool,
+}
+
+impl Default for LineSettings {
+    fn default() -> Self {
+        LineSettings {
+            weight: None,
+            cap_start: Cap::Butt,
+            cap_end: Cap::Butt,
+            pixel: false,
+        }
+    }
+}

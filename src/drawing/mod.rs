@@ -27,16 +27,18 @@ pub mod canvas_fast;
 pub mod rect_fast;
 pub mod circle_fast;
 pub mod text_fast;
+pub mod line_fast;
 
 pub mod canvas_quality;
 pub mod pixel_quality;
 pub mod rect_quality;
 pub mod circle_quality;
 pub mod text_quality;
+pub mod line_quality;
 
 pub use canvas_fast::CanvasFast;
 pub use canvas_quality::{CanvasQuality, Pixel};
-pub use shared::TextSettings;
+pub use shared::{BlendMode, TextSettings, LineSettings, TableSettings};
 
 use crate::vm::FontCache;
 use spirix::{CircleF4E4, ScalarF4E4};
@@ -195,6 +197,27 @@ impl Canvas {
         }
     }
 
+    pub fn draw_line(
+        &mut self,
+        start: CircleF4E4,
+        end: CircleF4E4,
+        colour: &vsf::VsfType,
+        settings: &LineSettings,
+    ) -> Result<(), String> {
+        match self {
+            Canvas::Fast(c) => {
+                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
+                c.draw_line(start, end, u32_colour, settings);
+                Ok(())
+            }
+            Canvas::Quality(c) => {
+                let pixel = crate::renderer::extract_colour_linear(colour)?;
+                c.draw_line(start, end, pixel, settings);
+                Ok(())
+            }
+        }
+    }
+
     pub fn fill_circle(&mut self, center: CircleF4E4, radius: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
         match self {
             Canvas::Fast(c) => {
@@ -208,5 +231,72 @@ impl Canvas {
                 Ok(())
             }
         }
+    }
+
+    pub fn fill_ellipse(&mut self, center: CircleF4E4, radii: CircleF4E4, colour: &vsf::VsfType) -> Result<(), String> {
+        match self {
+            Canvas::Fast(c) => {
+                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
+                c.fill_ellipse(center, radii, u32_colour);
+                Ok(())
+            }
+            Canvas::Quality(c) => {
+                let pixel = crate::renderer::extract_colour_linear(colour)?;
+                c.fill_ellipse(center, radii, pixel);
+                Ok(())
+            }
+        }
+    }
+
+    pub fn stroke_ellipse(
+        &mut self,
+        center: CircleF4E4,
+        radii: CircleF4E4,
+        stroke_width: ScalarF4E4,
+        colour: &vsf::VsfType,
+    ) -> Result<(), String> {
+        match self {
+            Canvas::Fast(c) => {
+                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
+                c.stroke_ellipse(center, radii, stroke_width, u32_colour);
+                Ok(())
+            }
+            Canvas::Quality(c) => {
+                let pixel = crate::renderer::extract_colour_linear(colour)?;
+                c.stroke_ellipse(center, radii, stroke_width, pixel);
+                Ok(())
+            }
+        }
+    }
+
+    /// Create a transparent layer canvas matching this canvas's pipeline and dimensions.
+    pub fn new_layer(&self) -> Canvas {
+        match self {
+            Canvas::Fast(c) => Canvas::Fast(CanvasFast::new_layer(c.width(), c.height(), &c.coords)),
+            Canvas::Quality(c) => Canvas::Quality(CanvasQuality::new_layer(c.width(), c.height(), c.ru())),
+        }
+    }
+
+    /// Composite a layer onto this canvas with opacity and blend mode.
+    ///
+    /// Fast path: if opacity is 1.0 and mode is Normal, this is a no-op
+    /// (caller should have rendered directly into self instead).
+    pub fn composite_layer(&mut self, layer: &Canvas, opacity: ScalarF4E4, mode: BlendMode) {
+        match (self, layer) {
+            (Canvas::Fast(dst), Canvas::Fast(src)) => {
+                let a = (opacity * ScalarF4E4::from(255)).to_isize().clamp(0, 255) as u8;
+                dst.composite_from(src, a, mode);
+            }
+            (Canvas::Quality(dst), Canvas::Quality(src)) => {
+                dst.composite_from(src, opacity, mode);
+            }
+            _ => {} // mismatched pipelines — silently skip
+        }
+    }
+
+    /// Returns true if the given opacity + blend mode would be a passthrough
+    /// (no temp layer needed — render children directly).
+    pub fn is_layer_passthrough(opacity: ScalarF4E4, mode: BlendMode) -> bool {
+        mode.is_passthrough() && opacity >= ScalarF4E4::ONE
     }
 }

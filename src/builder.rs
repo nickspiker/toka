@@ -550,6 +550,217 @@ impl Program {
         self
     }
 
+    /// Draw text with wrap width (left-aligned, wrapping at given RU width).
+    /// Stack before call: font_bytes(vb), pos(c44), size(s44), text(x|l), colour
+    pub fn dt_wrap(mut self, wrap_width: f32) -> Self {
+        // Push wrap value + tag
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(wrap_width)).flatten());
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
+        // Push left-align tag
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("l".to_string()).flatten());
+        emit_op(&mut self.bytecode, b'd', b't');
+        self
+    }
+
+    /// Draw text with wrap width and explicit alignment.
+    /// align: 0=center, 1=left, 2=right
+    pub fn dt_wrap_align(mut self, wrap_width: f32, align: u8) -> Self {
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(wrap_width)).flatten());
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
+        // Alignment tag
+        match align {
+            1 => {
+                emit_op(&mut self.bytecode, b'p', b's');
+                self.bytecode.extend_from_slice(&VsfType::l("l".to_string()).flatten());
+            }
+            2 => {
+                emit_op(&mut self.bytecode, b'p', b's');
+                self.bytecode.extend_from_slice(&VsfType::l("r".to_string()).flatten());
+            }
+            _ => {} // center = default, no tag needed
+        }
+        emit_op(&mut self.bytecode, b'd', b't');
+        self
+    }
+
+    /// Draw text with leading (line height multiplier).
+    /// Stack before call: font_bytes(vb), pos(c44), size(s44), text(x|l), colour
+    pub fn dt_leading(mut self, leading: f32) -> Self {
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(leading)).flatten());
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("e".to_string()).flatten());
+        emit_op(&mut self.bytecode, b'd', b't');
+        self
+    }
+
+    // ==================== DRAW LINE ====================
+
+    /// Draw line with default settings (1px hairline, butt cap).
+    /// Stack before call: start(c44), end(c44), colour
+    /// VSF: {dl}
+    pub fn dl(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'd', b'l');
+        self
+    }
+
+    /// Draw line with weight (thick line, butt caps).
+    /// Stack before call: start(c44), end(c44), colour
+    /// Tags pushed: s44(weight), l("w") — VM pops tag first, then value
+    pub fn dl_weight(mut self, weight: f32) -> Self {
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(weight)).flatten());
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("w".to_string()).flatten());
+        emit_op(&mut self.bytecode, b'd', b'l');
+        self
+    }
+
+    /// Draw line in pixel mode (always 1 device pixel).
+    /// Stack before call: start(c44), end(c44), colour
+    pub fn dl_pixel(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("p".to_string()).flatten());
+        emit_op(&mut self.bytecode, b'd', b'l');
+        self
+    }
+
+    /// Draw line with weight and round caps (both ends).
+    /// Stack before call: start(c44), end(c44), colour
+    pub fn dl_round(mut self, weight: f32) -> Self {
+        // Push value, then tag — VM pops tag first, then reads value
+        // Weight
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(weight)).flatten());
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("w".to_string()).flatten());
+        // Cap (both)
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::u3(1).flatten());
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("c".to_string()).flatten());
+        emit_op(&mut self.bytecode, b'd', b'l');
+        self
+    }
+
+    // ==================== DRAW TABLE ====================
+
+    /// Draw a table. Same base stack as draw_text (font, pos, size, colour),
+    /// with all table data via tags.
+    ///
+    /// Stack before: font_bytes(vb), pos(c44), size(s44)
+    /// Tags pushed: cell data, cols, rows, width, styling
+    ///
+    /// `headers`: column header strings (first row)
+    /// `rows`: data rows (each row is a slice of cell strings)
+    /// `text_colour`: VSF colour bytes
+    /// `width`: table width in RU
+    /// `header_bg`: optional header background colour (VSF bytes)
+    /// `border_colour`: optional grid/border colour (VSF bytes)
+    /// `alt_row_bg`: optional alternating row background colour (VSF bytes)
+    pub fn draw_table(
+        mut self,
+        headers: &[&str],
+        rows: &[&[&str]],
+        text_colour: &[u8],
+        col_widths: Option<&[f32]>,
+        header_bg: Option<&[u8]>,
+        border_colour: Option<&[u8]>,
+        alt_row_bg: Option<&[u8]>,
+        h_align: Option<&str>,
+        v_align: Option<&str>,
+    ) -> Self {
+        let cols = headers.len();
+        let total_rows = 1 + rows.len();
+
+        // Push text colour (base param, like dt)
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(text_colour);
+
+        // Tags — pushed top-down, VM pops top-first
+        // Alignment tags (optional)
+        if let Some(va) = v_align {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l(va.to_string()).flatten());
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("v".to_string()).flatten());
+        }
+        if let Some(ha) = h_align {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l(ha.to_string()).flatten());
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("j".to_string()).flatten());
+        }
+        // Styling tags (optional)
+        if let Some(alt) = alt_row_bg {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(alt);
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("a".to_string()).flatten());
+        }
+        if let Some(border) = border_colour {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(border);
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("b".to_string()).flatten());
+        }
+        if let Some(header) = header_bg {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(header);
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("h".to_string()).flatten());
+        }
+        // Per-column widths (optional — omit for all auto-fit. 0 = hidden.)
+        if let Some(ws) = col_widths {
+            for &w in ws {
+                emit_op(&mut self.bytecode, b'p', b's');
+                self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(w)).flatten());
+            }
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
+        }
+
+        // Cell data — push strings first (they'll be under the 'd' tag)
+        // Row-major: header row, then data rows
+        for h in headers {
+            self = self.ps_str(h);
+        }
+        for row in rows {
+            for cell in *row {
+                self = self.ps_str(cell);
+            }
+        }
+        // 'd' tag tells VM to pop cols*rows strings
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("d".to_string()).flatten());
+
+        // Row count
+        self = self.ps_u32(total_rows as u32);
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("r".to_string()).flatten());
+
+        // Column count (must come before 'r' and 'd' in parse order, so pushed last)
+        self = self.ps_u32(cols as u32);
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("c".to_string()).flatten());
+
+        // Emit draw_table opcode
+        emit_op(&mut self.bytecode, b't', b'b');
+        self
+    }
+
+    /// Raw draw_table opcode — expects stack already set up.
+    /// VSF: {tb}
+    pub fn tb(mut self) -> Self {
+        emit_op(&mut self.bytecode, b't', b'b');
+        self
+    }
+
     /// Clear canvas: pop VSF colour (rc*, ra, rw) and fill canvas
     /// VSF: {cr}
     pub fn cr(mut self) -> Self {

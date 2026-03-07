@@ -302,6 +302,15 @@ pub enum Opcode {
     /// VSF: {dt}
     draw_text,
 
+    /// Draw line: pop colour, end (c44), start (c44) [, LineSettings tags]
+    /// VSF: {dl}
+    draw_line,
+
+    /// Draw table: pop colour, size(s44), pos(c44), font_bytes [, TableSettings tags]
+    /// Tags: c(cols), r(rows), d(cell data), w(width), h(header bg), b(border), a(alt bg), p(padding)
+    /// VSF: {tb}
+    draw_table,
+
     // ==================== CONTROL FLOW ====================
     /// Call function at bytecode offset
     /// VSF: {cn}[offset:u]
@@ -491,6 +500,8 @@ impl Opcode {
             0x6372 => Some(Self::clear_canvas),  // cr
             0x726c => Some(Self::render_loom),   // rl
             0x6474 => Some(Self::draw_text),     // dt
+            0x646c => Some(Self::draw_line),     // dl
+            0x7462 => Some(Self::draw_table),    // tb
 
             // Control flow
             0x636e => Some(Self::call),          // cn
@@ -626,6 +637,8 @@ impl Opcode {
             Self::clear_canvas => *b"cr",
             Self::render_loom => *b"rl",
             Self::draw_text => *b"dt",
+            Self::draw_line => *b"dl",
+            Self::draw_table => *b"tb",
             Self::call => *b"cn",
             Self::return_ => *b"re",
             Self::return_value => *b"rv",
