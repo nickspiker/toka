@@ -239,6 +239,26 @@ async function resolveHandle(handleName) {
 
 let currentBytecode = null;  // Store bytecode for reactive rendering
 
+// Load a capsule directly by URL (no handle resolution)
+async function loadDirect(url) {
+    try {
+        log(`Fetching capsule: ${url}`, 'info');
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const capsuleData = new Uint8Array(await response.arrayBuffer());
+        log(`Fetched ${capsuleData.length} bytes`, 'info');
+
+        const bytecode = wasmModule.load_capsule(capsuleData);
+        log(`Extracted ${bytecode.length} bytes of bytecode`, 'info');
+
+        currentBytecode = bytecode;
+        reactiveRender();
+    } catch (err) {
+        log(`Failed to load capsule: ${err}`, 'error');
+    }
+}
+window.loadDirect = loadDirect;
+
 async function loadAndRenderCapsule(handleName) {
     const bytecode = await resolveHandle(handleName);
     if (!bytecode) return;
@@ -287,33 +307,43 @@ function reactiveRender() {
     }
 }
 
-// Setup handle input
+// Setup handle input (both modal overlay and console toolbar)
 function setupHandleInput() {
     const handleInput = document.getElementById('handleInput');
     const handleField = document.getElementById('handleField');
 
-    if (!handleField) {
-        log('ERROR: handleField element not found!', 'error');
-        return;
+    // Modal overlay input (shown on first load)
+    if (handleField) {
+        handleField.addEventListener('keypress', async (e) => {
+            if (e.key === 'Enter') {
+                const handle = handleField.value.trim();
+                if (handle) {
+                    log(`Loading: ${handle}`, 'info');
+                    if (handleInput) handleInput.classList.add('hidden');
+                    await loadAndRenderCapsule(handle);
+                }
+            }
+        });
+        handleField.focus();
     }
 
-    log('Setting up handle input listener...', 'info');
-
-    handleField.addEventListener('keypress', async (e) => {
-        if (e.key === 'Enter') {
-            const handle = handleField.value.trim();
-            if (handle) {
-                log(`Loading: ${handle}`, 'info');
-                handleInput.classList.add('hidden');
-                await loadAndRenderCapsule(handle);
+    // Console toolbar handle input (always available)
+    const consoleHandle = document.getElementById('consoleHandle');
+    if (consoleHandle) {
+        consoleHandle.addEventListener('keypress', async (e) => {
+            if (e.key === 'Enter') {
+                const handle = consoleHandle.value.trim();
+                if (handle) {
+                    log(`Loading: ${handle}`, 'info');
+                    if (handleInput) handleInput.classList.add('hidden');
+                    consoleHandle.value = '';
+                    await loadAndRenderCapsule(handle);
+                }
             }
-        }
-    });
+        });
+    }
 
-    // Focus on load
-    log('Focusing handle field...', 'info');
-    handleField.focus();
-    log('Handle input setup complete', 'info');
+    log('Handle input ready', 'info');
 }
 
 // Toggle between fast and quality pipeline

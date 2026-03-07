@@ -173,6 +173,23 @@
         .console-btn:hover {
             background: rgba(74, 158, 255, 0.2);
         }
+
+        .console-handle {
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            color: #e0e0e0;
+            border: 1px solid #4a9eff44;
+            border-radius: 2px;
+            padding: 2px 8px;
+            width: 160px;
+            outline: none;
+        }
+
+        .console-handle:focus {
+            border-color: #4a9eff;
+            background: rgba(255, 255, 255, 0.1);
+        }
     </style>
 </head>
 <body>
@@ -184,6 +201,7 @@
             <span class="colour-hex" id="colourHex">── ── ── ──</span>
             <span class="colour-coords" id="colourCoords">x:─── y:───</span>
             <div class="console-toolbar">
+                <input type="text" id="consoleHandle" class="console-handle" placeholder="handle..." autocomplete="off" />
                 <span class="pipeline-label" id="pipelineLabel">pipeline: fast</span>
                 <button class="console-btn" id="pipelineToggleBtn" onclick="togglePipeline()">toggle pipeline</button>
             </div>
