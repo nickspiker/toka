@@ -160,10 +160,17 @@ impl TextSettings {
 ///   `b` + colour — border/grid colour
 ///   `a` + colour — alternating row background colour
 ///   `p` + s44   — cell padding in RU (default: 0)
+///   `g` + bytes — bitpacked grid mask (per-segment border control)
+///     Byte 0: flags (bit 0 = horizontal mask, bit 1 = vertical mask)
+///     Then horizontal mask: (rows+1)×cols bits, MSB-first, row-major
+///     Then vertical mask: rows×(cols+1) bits, MSB-first, row-major
+///     Bit=1 draws segment, bit=0 skips. Default (no `g` tag) = all segments.
+///     Masks are applied with last-wins — push multiple `g` tags to layer.
 ///
 /// Per-column alignment:
 ///   `j` + string — horizontal justify per column (`l`/`c`/`r`, default: center)
 ///   `v` + string — vertical alignment per column (`t`/`m`/`b`, default: middle)
+#[derive(Clone)]
 pub struct TableSettings {
     /// `x` — Per-column widths in RU. 0 = hidden. None = all auto-fit.
     pub col_widths: Option<Vec<ScalarF4E4>>,
@@ -177,10 +184,56 @@ pub struct TableSettings {
     pub alt_row_bg: Option<vsf::VsfType>,
     /// `p` — Cell padding in RU
     pub padding: ScalarF4E4,
+    /// `g` — Bitpacked grid mask for per-segment border control
+    pub grid_mask: Option<GridMask>,
     /// `j` — Per-column horizontal justify (one char per column: l/c/r)
     pub h_align: Option<Vec<u8>>,
     /// `v` — Per-column vertical alignment (one char per column: t/m/b)
     pub v_align: Option<Vec<u8>>,
+}
+
+/// Bitpacked per-segment border mask.
+///
+/// Each bit controls one border segment. Horizontal segments are
+/// the lines between rows (including top/bottom edges), spanning
+/// each column. Vertical segments are the lines between columns
+/// (including left/right edges), spanning each row.
+///
+/// Bits are packed MSB-first, row-major within each mask.
+#[derive(Clone)]
+pub struct GridMask {
+    /// Horizontal segment bits: (rows+1) × cols, one bit per segment
+    pub h_bits: Vec<u8>,
+    /// Vertical segment bits: rows × (cols+1), one bit per segment
+    pub v_bits: Vec<u8>,
+    /// Whether horizontal mask is present (if false, no horizontal lines)
+    pub has_h: bool,
+    /// Whether vertical mask is present (if false, no vertical lines)
+    pub has_v: bool,
+}
+
+impl GridMask {
+    /// Check if a horizontal segment should be drawn.
+    /// `row_gap` = 0..=rows, `col` = 0..cols
+    pub fn h_segment(&self, row_gap: usize, col: usize, cols: usize) -> bool {
+        if !self.has_h { return false; }
+        let bit_idx = row_gap * cols + col;
+        let byte_idx = bit_idx / 8;
+        let bit_pos = 7 - (bit_idx % 8); // MSB-first
+        if byte_idx >= self.h_bits.len() { return false; }
+        (self.h_bits[byte_idx] >> bit_pos) & 1 == 1
+    }
+
+    /// Check if a vertical segment should be drawn.
+    /// `row` = 0..rows, `col_gap` = 0..=cols
+    pub fn v_segment(&self, row: usize, col_gap: usize, cols_plus_1: usize) -> bool {
+        if !self.has_v { return false; }
+        let bit_idx = row * cols_plus_1 + col_gap;
+        let byte_idx = bit_idx / 8;
+        let bit_pos = 7 - (bit_idx % 8);
+        if byte_idx >= self.v_bits.len() { return false; }
+        (self.v_bits[byte_idx] >> bit_pos) & 1 == 1
+    }
 }
 
 impl Default for TableSettings {
@@ -192,6 +245,7 @@ impl Default for TableSettings {
             border_colour: None,
             alt_row_bg: None,
             padding: ScalarF4E4::ZERO,
+            grid_mask: None,
             h_align: None,
             v_align: None,
         }

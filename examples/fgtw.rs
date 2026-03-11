@@ -94,24 +94,22 @@ No servers. No accounts. Just math.")
         .hl()
         .build();
 
-    let handle_name = "fgtw";
-    let (public_id, filename) = handle::resolve_handle(handle_name);
-    let provenance_bytes: [u8; 32] = *public_id.as_bytes();
+    // Build for both "fgtw" and "octopus" handles
+    for handle_name in &["fgtw", "octopus"] {
+        let (public_id, filename) = handle::resolve_handle(handle_name);
+        let provenance_bytes: [u8; 32] = *public_id.as_bytes();
 
-    let capsule = CapsuleBuilder::new(bytecode)
-        .provenance(provenance_bytes)
-        .build()?;
+        let capsule = CapsuleBuilder::new(bytecode.clone())
+            .provenance(provenance_bytes)
+            .build()?;
 
-    // Write to www/capsules/ for the browser test page
-    let path = format!("www/capsules/{}", filename);
-    std::fs::write(&path, &capsule)?;
+        let path = format!("www/capsules/{}", filename);
+        std::fs::write(&path, &capsule)?;
 
-    // Also write as fgtw.vsf for the dedicated page
-    std::fs::write("www/fgtw.vsf", &capsule)?;
+        println!("Handle: \"{}\"", handle_name);
+        println!("Public ID: {}", public_id.to_hex());
+        println!("Created {} ({} bytes)", path, capsule.len());
+    }
 
-    println!("Handle: \"{}\"", handle_name);
-    println!("Public ID: {}", public_id.to_hex());
-    println!("Created {} ({} bytes)", path, capsule.len());
-    println!("Also wrote www/fgtw.vsf");
     Ok(())
 }

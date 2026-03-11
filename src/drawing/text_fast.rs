@@ -5,7 +5,7 @@
 //!     - Left-aligned:  anchor = left edge of first glyph
 //!     - Center-aligned: anchor = horizontal center of text block
 //!     - Right-aligned: anchor = right edge of last glyph
-//!   - Y anchor is the baseline of the first line
+//!   - Y anchor is the vertical center of the text block
 //!
 //! When wrap width is set, fontdue's built-in per-line alignment is used.
 //! When no wrap, manual per-line shifting handles multi-line text (\n).
@@ -50,13 +50,9 @@ impl CanvasFast {
         let canvas_w = self.coords.width as isize;
         let canvas_h = self.coords.height as isize;
 
-        // Offset y so the anchor means "baseline" instead of "top of layout box".
-        // fontdue's layout y is the top of the first line; subtract ascent to convert.
-        let ascent = font
-            .horizontal_line_metrics(px)
-            .map(|m| m.ascent)
-            .unwrap_or(px);
-        let baseline_y = anchor_y - ascent;
+        // Layout starts at anchor_y; shift_y (computed after layout) will
+        // correct vertical position to center the full text block on anchor_y.
+        let baseline_y = ScalarF4E4::from(anchor_y);
 
         let wrap_px = settings.wrap.map(|w| w * self.coords.span * self.coords.ru);
 
@@ -98,11 +94,28 @@ impl CanvasFast {
         layout.reset(&layout_settings);
         layout.append(&[font as &FontdueFont], &TextStyle::new(text, px, 0));
 
+        // Compute vertical shift to center entire text block on anchor_y.
+        // baseline_y was set assuming single-line height; correct for multi-line.
+        let glyphs = layout.glyphs();
+        let shift_y = if glyphs.is_empty() {
+            ScalarF4E4::ZERO
+        } else {
+            let mut min_y = glyphs[0].y;
+            let mut max_y = glyphs[0].y + (glyphs[0].height);
+            for g in glyphs.iter().skip(1) {
+                if g.y < min_y { min_y = g.y; }
+                let bottom = g.y + (g.height);
+                if bottom > max_y { max_y = bottom; }
+            }
+            let actual_h = max_y - min_y;
+            // Desired top = anchor_y - actual_h/2; current top = min_y
+            ScalarF4E4::from(anchor_y) - (actual_h >> 1usize) - min_y
+        };
+
         // For no-wrap mode: single global shift for center/right alignment.
         let shift_x = if use_fontdue_align || settings.align == 1 {
             ScalarF4E4::ZERO
         } else {
-            let glyphs = layout.glyphs();
             if glyphs.is_empty() {
                 ScalarF4E4::ZERO
             } else {
@@ -138,7 +151,7 @@ impl CanvasFast {
             let glyph_w = metrics.width as isize;
             let glyph_h = metrics.height as isize;
             let gx = (glyph.x + shift_x).floor().to_isize();
-            let gy = glyph.y.floor().to_isize();
+            let gy = (glyph.y + shift_y).floor().to_isize();
 
             let row_start = ((-gy).max(0)) as isize;
             let row_end = ((canvas_h - gy).min(glyph_h)) as isize;

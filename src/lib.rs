@@ -76,18 +76,21 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod opcode;
 
 /// VM execution engine
+#[cfg(feature = "runtime")]
 pub mod vm;
 
 /// Bytecode builder with chainable opcode methods
 pub mod builder;
 
 /// Direct VSF ro* to Canvas renderer
+#[cfg(feature = "runtime")]
 pub mod renderer;
 
 /// Capsule: signed executable bundle
 pub mod capsule;
 
 /// Drawing primitives (line, path, etc.)
+#[cfg(feature = "runtime")]
 pub mod drawing;
 
 /// Placeholder module for future capability system
@@ -96,7 +99,7 @@ pub mod capability {
 }
 
 /// WASM bindings for browser integration
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "runtime"))]
 pub mod wasm {
     //! WebAssembly bindings for running Toka in the browser
     //!
@@ -261,18 +264,10 @@ pub mod wasm {
         /// Re-run the bytecode (re-execute from beginning)
         ///
         /// Use after adjusting zoom or scroll to re-render with new values.
+        /// Preserves widget state (text inputs, focus) for interactive continuity.
         pub fn rerun(&mut self, bytecode: Vec<u8>) -> Result<bool, String> {
-            // Save state
-            let w = self.vm.canvas().width();
-            let h = self.vm.canvas().height();
-            let ru = self.vm.canvas().ru();
-            let scroll_x = self.vm.scroll_x();
-            let scroll_y = self.vm.scroll_y();
-
-            // Create new VM with same state
-            self.vm = crate::vm::VM::with_canvas(bytecode, w, h);
-            self.vm.canvas_mut().set_ru(ru);
-            self.vm.set_scroll(scroll_x, scroll_y);
+            self.vm.set_bytecode(bytecode);
+            self.vm.reset();
 
             // Run to completion
             self.vm.run().map_err(|e| e.to_string())?;
@@ -304,6 +299,85 @@ pub mod wasm {
         #[wasm_bindgen]
         pub fn pipeline_name(&self) -> String {
             self.vm.canvas().pipeline_name().to_string()
+        }
+
+        // ── Interactive widget API ──────────────────────────
+
+        /// Push a mouse down event (RU coordinates)
+        pub fn push_mouse_down(&mut self, x: f64, y: f64) {
+            self.vm.push_event(crate::vm::InputEvent::MouseDown {
+                x: ScalarF4E4::from_f64(x),
+                y: ScalarF4E4::from_f64(y),
+            });
+        }
+
+        /// Push a mouse up event (RU coordinates)
+        pub fn push_mouse_up(&mut self, x: f64, y: f64) {
+            self.vm.push_event(crate::vm::InputEvent::MouseUp {
+                x: ScalarF4E4::from_f64(x),
+                y: ScalarF4E4::from_f64(y),
+            });
+        }
+
+        /// Push a text input event (printable characters)
+        pub fn push_key_press(&mut self, text: &str) {
+            self.vm.push_event(crate::vm::InputEvent::KeyPress {
+                text: text.to_string(),
+            });
+        }
+
+        /// Push a key down event (non-character keys like Backspace, ArrowLeft)
+        pub fn push_key_down(&mut self, key: &str) {
+            self.vm.push_event(crate::vm::InputEvent::KeyDown {
+                key: key.to_string(),
+            });
+        }
+
+        /// Drain events after frame execution
+        pub fn drain_events(&mut self) {
+            self.vm.drain_events();
+        }
+
+        /// Get the cursor type for the current mouse position
+        /// Returns: "default", "pointer", or "text"
+        pub fn cursor_at(&self, x: f64, y: f64) -> String {
+            let sx = ScalarF4E4::from_f64(x);
+            let sy = ScalarF4E4::from_f64(y);
+            match self.vm.hit_test(sx, sy) {
+                Some(region) => match region.cursor {
+                    crate::vm::CursorKind::Default => "default".to_string(),
+                    crate::vm::CursorKind::Pointer => "pointer".to_string(),
+                    crate::vm::CursorKind::Text => "text".to_string(),
+                },
+                None => "default".to_string(),
+            }
+        }
+
+        /// Get the focused widget ID (or -1 if none)
+        pub fn focused_widget(&self) -> i32 {
+            self.vm.focused_widget().map(|id| id as i32).unwrap_or(-1)
+        }
+
+        /// Set mouse position (in RU) — for cursor tracking
+        pub fn set_mouse(&mut self, x: f64, y: f64) {
+            self.vm.set_mouse(ScalarF4E4::from_f64(x), ScalarF4E4::from_f64(y));
+        }
+
+        /// Drain triggered action URLs (returns JSON array string)
+        ///
+        /// After each interactive rerender, JS should call this and POST each URL.
+        /// Returns "[]" if no actions were triggered.
+        pub fn drain_actions(&mut self) -> String {
+            let actions = self.vm.drain_actions();
+            if actions.is_empty() {
+                "[]".to_string()
+            } else {
+                // Simple JSON array serialization
+                let escaped: Vec<String> = actions.iter().map(|url| {
+                    format!("\"{}\"", url.replace('\\', "\\\\").replace('"', "\\\""))
+                }).collect();
+                format!("[{}]", escaped.join(","))
+            }
         }
     }
 

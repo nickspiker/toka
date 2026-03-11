@@ -18,12 +18,317 @@
 //! ```
 
 use spirix::*;
-use vsf::types::VsfType;
+use vsf::types::{ButtonVariant, VsfType};
+
+/// Cell content for mixed-content tables (text, buttons, text inputs).
+///
+/// Used with `draw_table_mixed` to embed interactive widgets directly in table cells.
+/// Widget cells are drawn by the table renderer with proper padding and alignment.
+pub enum CellData<'a> {
+    /// Plain text cell
+    Text(&'a str),
+    /// Text cell with custom colour and optional size override
+    Styled {
+        /// Cell text content
+        text: &'a str,
+        /// VSF colour bytes
+        colour: &'a [u8],
+        /// Optional font size override (RU)
+        size: Option<f32>,
+    },
+    /// Button cell — draws stroke_rect + centered label, pushes s44(1/0) for click
+    Button {
+        /// Button label text
+        label: &'a str,
+        /// VSF colour bytes for the button border and text
+        colour: &'a [u8],
+        /// Unique widget ID for hit detection
+        id: u32,
+        /// If non-empty, POSTs to this URL on click
+        action: &'a str,
+    },
+    /// Text input cell — draws editable text field, pushes current text
+    TextInput {
+        /// Placeholder text shown when input is empty
+        placeholder: &'a str,
+        /// VSF colour bytes for the input border and text
+        colour: &'a [u8],
+        /// Unique widget ID for hit detection and state management
+        id: u32,
+    },
+    /// Sub-table cell — nested table rendered within the parent cell
+    SubTable {
+        /// Column headers for the sub-table
+        headers: &'a [&'a str],
+        /// Row data — each row is a slice of CellData
+        rows: &'a [&'a [CellData<'a>]],
+        /// Optional per-column widths as fractions of sub-table width
+        col_widths: Option<&'a [f32]>,
+        /// Optional horizontal alignment string (l/c/r per column)
+        h_align: Option<&'a str>,
+        /// Optional border: (colour bytes, grid mask bytes)
+        border: Option<(&'a [u8], &'a [u8])>,
+        /// Optional header background colour bytes
+        header_bg: Option<&'a [u8]>,
+        /// Optional alternating row background colour bytes
+        alt_row_bg: Option<&'a [u8]>,
+        /// Optional cell padding in RU
+        padding: Option<f32>,
+    },
+}
+
+/// Build a `VsfType::roa` from sub-table cell data.
+///
+/// Children layout: [cells (cols × total_rows), settings tags...]
+/// Settings are encoded as tag pairs: `l("tag"), value`.
+fn build_roa_from_cell_data(
+    headers: &[&str],
+    rows: &[&[CellData]],
+    col_widths: Option<&[f32]>,
+    h_align: Option<&str>,
+    border: Option<(&[u8], &[u8])>,
+    header_bg: Option<&[u8]>,
+    alt_row_bg: Option<&[u8]>,
+    padding: Option<f32>,
+) -> VsfType {
+    let cols = headers.len();
+    let total_rows = 1 + rows.len(); // header row + data rows
+    let mut children = Vec::new();
+
+    // Cell content: header row first, then data rows
+    // Use VsfType::l (ASCII) not VsfType::x (Huffman) — roa is flattened without 'text' feature
+    for h in headers {
+        children.push(VsfType::l(h.to_string()));
+    }
+    for row in rows {
+        for cell in *row {
+            match cell {
+                CellData::Text(s) => children.push(VsfType::l(s.to_string())),
+                CellData::Styled { text: s, .. } => {
+                    children.push(VsfType::l(s.to_string()));
+                }
+                CellData::Button { label, colour, id: _, action: _ } => {
+                    // Sub-table buttons: display-only (one entry per cell)
+                    let mut ptr = 0;
+                    let colour_vsf = vsf::parse::parse(colour, &mut ptr)
+                        .expect("SubTable Button: invalid colour bytes");
+                    children.push(VsfType::rou(
+                        CircleF4E4::ZERO, CircleF4E4::ZERO,
+                        label.to_string(), ButtonVariant::Filled,
+                        Box::new(colour_vsf),
+                    ));
+                }
+                CellData::TextInput { placeholder, colour, id: _ } => {
+                    // Sub-table text inputs: display-only (one entry per cell)
+                    let mut ptr = 0;
+                    let colour_vsf = vsf::parse::parse(colour, &mut ptr)
+                        .expect("SubTable TextInput: invalid colour bytes");
+                    children.push(VsfType::roq(
+                        CircleF4E4::ZERO, CircleF4E4::ZERO,
+                        placeholder.to_string(),
+                        Box::new(colour_vsf),
+                    ));
+                }
+                CellData::SubTable { headers: sh, rows: sr, col_widths: sw, h_align: sa,
+                                     border: sb, header_bg: shb, alt_row_bg: sab, padding: sp } => {
+                    children.push(build_roa_from_cell_data(
+                        sh, sr, *sw, *sa, *sb, *shb, *sab, *sp,
+                    ));
+                }
+            }
+        }
+    }
+
+    // Settings tags (after cell data)
+    if let Some(widths) = col_widths {
+        children.push(VsfType::l("x".to_string()));
+        for &w in widths {
+            children.push(VsfType::s44(ScalarF4E4::from_f32(w)));
+        }
+    }
+    if let Some(align) = h_align {
+        children.push(VsfType::l("j".to_string()));
+        children.push(VsfType::l(align.to_string()));
+    }
+    if let Some((colour, mask)) = border {
+        children.push(VsfType::l("b".to_string()));
+        let mut ptr = 0;
+        children.push(vsf::parse::parse(colour, &mut ptr)
+            .expect("SubTable border: invalid colour bytes"));
+        children.push(VsfType::v(b'b', mask.to_vec()));
+    }
+    if let Some(colour) = header_bg {
+        children.push(VsfType::l("h".to_string()));
+        let mut ptr = 0;
+        children.push(vsf::parse::parse(colour, &mut ptr)
+            .expect("SubTable header_bg: invalid colour bytes"));
+    }
+    if let Some(colour) = alt_row_bg {
+        children.push(VsfType::l("a".to_string()));
+        let mut ptr = 0;
+        children.push(vsf::parse::parse(colour, &mut ptr)
+            .expect("SubTable alt_row_bg: invalid colour bytes"));
+    }
+    if let Some(pad) = padding {
+        children.push(VsfType::l("p".to_string()));
+        children.push(VsfType::s44(ScalarF4E4::from_f32(pad)));
+    }
+
+    VsfType::roa(cols, total_rows, children)
+}
 
 /// Emit a VSF-encoded opcode: `{ab}` -> 4 bytes
 #[inline]
 fn emit_op(bytecode: &mut Vec<u8>, a: u8, b: u8) {
     bytecode.extend_from_slice(&VsfType::op(a, b).flatten());
+}
+
+/// Builder for bitpacked grid masks (per-segment border control in tables).
+///
+/// Creates a compact byte blob encoding which horizontal and vertical
+/// border segments to draw. Bits are packed MSB-first, row-major.
+///
+/// # Example: header-only border (line under header row)
+/// ```rust
+/// let mask = GridMaskBuilder::new(3, 5) // 3 rows, 5 columns
+///     .h_row(1, true)   // horizontal line under header (row gap 1)
+///     .build();
+/// ```
+pub struct GridMaskBuilder {
+    rows: usize,
+    cols: usize,
+    h_bits: Vec<u8>,  // (rows+1) × cols bits
+    v_bits: Vec<u8>,  // rows × (cols+1) bits
+    has_h: bool,
+    has_v: bool,
+}
+
+impl GridMaskBuilder {
+    /// Create a new grid mask for a table with the given dimensions.
+    /// All segments start as OFF (no borders).
+    pub fn new(rows: usize, cols: usize) -> Self {
+        let h_bits_count = (rows + 1) * cols;
+        let v_bits_count = rows * (cols + 1);
+        Self {
+            rows,
+            cols,
+            h_bits: vec![0u8; (h_bits_count + 7) / 8],
+            v_bits: vec![0u8; (v_bits_count + 7) / 8],
+            has_h: false,
+            has_v: false,
+        }
+    }
+
+    /// Create a grid mask with all segments ON (full grid).
+    pub fn full(rows: usize, cols: usize) -> Self {
+        let h_bits_count = (rows + 1) * cols;
+        let v_bits_count = rows * (cols + 1);
+        Self {
+            rows,
+            cols,
+            h_bits: vec![0xFF; (h_bits_count + 7) / 8],
+            v_bits: vec![0xFF; (v_bits_count + 7) / 8],
+            has_h: true,
+            has_v: true,
+        }
+    }
+
+    fn set_h_bit(&mut self, row_gap: usize, col: usize, on: bool) {
+        let idx = row_gap * self.cols + col;
+        let byte = idx / 8;
+        let bit = 7 - (idx % 8);
+        if byte < self.h_bits.len() {
+            if on {
+                self.h_bits[byte] |= 1 << bit;
+            } else {
+                self.h_bits[byte] &= !(1 << bit);
+            }
+        }
+        self.has_h = true;
+    }
+
+    fn set_v_bit(&mut self, row: usize, col_gap: usize, on: bool) {
+        let idx = row * (self.cols + 1) + col_gap;
+        let byte = idx / 8;
+        let bit = 7 - (idx % 8);
+        if byte < self.v_bits.len() {
+            if on {
+                self.v_bits[byte] |= 1 << bit;
+            } else {
+                self.v_bits[byte] &= !(1 << bit);
+            }
+        }
+        self.has_v = true;
+    }
+
+    /// Set a single horizontal segment (line spanning one column at a row gap).
+    pub fn h(mut self, row_gap: usize, col: usize, on: bool) -> Self {
+        self.set_h_bit(row_gap, col, on);
+        self
+    }
+
+    /// Set an entire horizontal row of segments (all columns at a row gap).
+    pub fn h_row(mut self, row_gap: usize, on: bool) -> Self {
+        for col in 0..self.cols {
+            self.set_h_bit(row_gap, col, on);
+        }
+        self
+    }
+
+    /// Set a single vertical segment (line spanning one row at a column gap).
+    pub fn v(mut self, row: usize, col_gap: usize, on: bool) -> Self {
+        self.set_v_bit(row, col_gap, on);
+        self
+    }
+
+    /// Set an entire vertical column of segments (all rows at a column gap).
+    pub fn v_col(mut self, col_gap: usize, on: bool) -> Self {
+        for row in 0..self.rows {
+            self.set_v_bit(row, col_gap, on);
+        }
+        self
+    }
+
+    /// Explicitly enable horizontal mask with all bits off (no horizontal lines).
+    pub fn no_h(mut self) -> Self {
+        self.has_h = true;
+        self
+    }
+
+    /// Explicitly enable vertical mask with all bits off (no vertical lines).
+    pub fn no_v(mut self) -> Self {
+        self.has_v = true;
+        self
+    }
+
+    /// Set outer border only (top, bottom, left, right edges).
+    pub fn outer(mut self, on: bool) -> Self {
+        // Top and bottom horizontal rows
+        for col in 0..self.cols {
+            self.set_h_bit(0, col, on);
+            self.set_h_bit(self.rows, col, on);
+        }
+        // Left and right vertical columns
+        for row in 0..self.rows {
+            self.set_v_bit(row, 0, on);
+            self.set_v_bit(row, self.cols, on);
+        }
+        self
+    }
+
+    /// Build the grid mask byte blob for use with `draw_table_ex`.
+    pub fn build(self) -> Vec<u8> {
+        let mut out = Vec::new();
+        let flags = (if self.has_h { 1u8 } else { 0 }) | (if self.has_v { 2u8 } else { 0 });
+        out.push(flags);
+        if self.has_h {
+            out.extend_from_slice(&self.h_bits);
+        }
+        if self.has_v {
+            out.extend_from_slice(&self.v_bits);
+        }
+        out
+    }
 }
 
 /// Toka builder with chainable opcode methods
@@ -659,21 +964,137 @@ impl Program {
     /// `headers`: column header strings (first row)
     /// `rows`: data rows (each row is a slice of cell strings)
     /// `text_colour`: VSF colour bytes
-    /// `width`: table width in RU
+    /// `col_widths`: optional per-column widths in RU (0 = hidden, None = auto-fit)
     /// `header_bg`: optional header background colour (VSF bytes)
-    /// `border_colour`: optional grid/border colour (VSF bytes)
+    /// `border`: optional (colour, grid_mask) pair — colour + bitpacked mask from GridMaskBuilder
     /// `alt_row_bg`: optional alternating row background colour (VSF bytes)
+    /// `h_align`: per-column horizontal justify string (l/c/r per column)
+    /// `v_align`: per-column vertical alignment string (t/m/b per column)
     pub fn draw_table(
-        mut self,
+        self,
         headers: &[&str],
         rows: &[&[&str]],
         text_colour: &[u8],
         col_widths: Option<&[f32]>,
         header_bg: Option<&[u8]>,
-        border_colour: Option<&[u8]>,
+        border: Option<(&[u8], &[u8])>,
         alt_row_bg: Option<&[u8]>,
         h_align: Option<&str>,
         v_align: Option<&str>,
+    ) -> Self {
+        self.draw_table_inner(headers, rows, text_colour, col_widths, None,
+            header_bg, border, alt_row_bg, h_align, v_align, None, None)
+    }
+
+    /// Like `draw_table` but column widths scale with canvas width.
+    /// Each fraction is multiplied by `{cw}` at runtime: `{cw} frac {ml}`.
+    /// Fractions are relative to viewport width in RU.
+    pub fn draw_table_responsive(
+        self,
+        headers: &[&str],
+        rows: &[&[&str]],
+        text_colour: &[u8],
+        col_fractions: &[f32],
+        header_bg: Option<&[u8]>,
+        border: Option<(&[u8], &[u8])>,
+        alt_row_bg: Option<&[u8]>,
+        h_align: Option<&str>,
+        v_align: Option<&str>,
+    ) -> Self {
+        self.draw_table_inner(headers, rows, text_colour, None, Some(col_fractions),
+            header_bg, border, alt_row_bg, h_align, v_align, None, None)
+    }
+
+    /// Same as `draw_table_responsive` but with explicit cell padding (in RU)
+    pub fn draw_table_responsive_padded(
+        self,
+        headers: &[&str],
+        rows: &[&[&str]],
+        text_colour: &[u8],
+        col_fractions: &[f32],
+        header_bg: Option<&[u8]>,
+        border: Option<(&[u8], &[u8])>,
+        alt_row_bg: Option<&[u8]>,
+        h_align: Option<&str>,
+        v_align: Option<&str>,
+        padding: f32,
+    ) -> Self {
+        self.draw_table_inner(headers, rows, text_colour, None, Some(col_fractions),
+            header_bg, border, alt_row_bg, h_align, v_align, Some(padding), None)
+    }
+
+    /// Draw a table with some cells marked as widget slots.
+    /// `query_cells` is a list of `(row, col)` pairs (0-indexed, row 0 = header).
+    /// After drawing, the table pushes `font, pos(c44), size(c44), colour` for each
+    /// queried cell onto the stack (first cell on top). Use with `cell_button()` etc.
+    pub fn draw_table_widget(
+        self,
+        headers: &[&str],
+        rows: &[&[&str]],
+        text_colour: &[u8],
+        col_widths: Option<&[f32]>,
+        header_bg: Option<&[u8]>,
+        border: Option<(&[u8], &[u8])>,
+        alt_row_bg: Option<&[u8]>,
+        h_align: Option<&str>,
+        v_align: Option<&str>,
+        query_cells: &[(usize, usize)],
+    ) -> Self {
+        self.draw_table_inner(headers, rows, text_colour, col_widths, None,
+            header_bg, border, alt_row_bg, h_align, v_align, None, Some(query_cells))
+    }
+
+    /// Draw a responsive table with widget slots and optional padding.
+    pub fn draw_table_responsive_widget(
+        self,
+        headers: &[&str],
+        rows: &[&[&str]],
+        text_colour: &[u8],
+        col_fractions: &[f32],
+        header_bg: Option<&[u8]>,
+        border: Option<(&[u8], &[u8])>,
+        alt_row_bg: Option<&[u8]>,
+        h_align: Option<&str>,
+        v_align: Option<&str>,
+        query_cells: &[(usize, usize)],
+    ) -> Self {
+        self.draw_table_inner(headers, rows, text_colour, None, Some(col_fractions),
+            header_bg, border, alt_row_bg, h_align, v_align, None, Some(query_cells))
+    }
+
+    /// Draw a responsive table with widget slots and explicit padding.
+    pub fn draw_table_responsive_widget_padded(
+        self,
+        headers: &[&str],
+        rows: &[&[&str]],
+        text_colour: &[u8],
+        col_fractions: &[f32],
+        header_bg: Option<&[u8]>,
+        border: Option<(&[u8], &[u8])>,
+        alt_row_bg: Option<&[u8]>,
+        h_align: Option<&str>,
+        v_align: Option<&str>,
+        padding: f32,
+        query_cells: &[(usize, usize)],
+    ) -> Self {
+        self.draw_table_inner(headers, rows, text_colour, None, Some(col_fractions),
+            header_bg, border, alt_row_bg, h_align, v_align, Some(padding), Some(query_cells))
+    }
+
+    fn draw_table_inner(
+        mut self,
+        headers: &[&str],
+        rows: &[&[&str]],
+        text_colour: &[u8],
+        col_widths: Option<&[f32]>,
+        col_fractions: Option<&[f32]>,
+        header_bg: Option<&[u8]>,
+        border: Option<(&[u8], &[u8])>,
+        alt_row_bg: Option<&[u8]>,
+        h_align: Option<&str>,
+        v_align: Option<&str>,
+        padding: Option<f32>,
+        query_cells: Option<&[(usize, usize)]>,
     ) -> Self {
         let cols = headers.len();
         let total_rows = 1 + rows.len();
@@ -683,6 +1104,19 @@ impl Program {
         self.bytecode.extend_from_slice(text_colour);
 
         // Tags — pushed top-down, VM pops top-first
+        // Query cells tag (optional) — push geometry for these cells after drawing
+        if let Some(qc) = query_cells {
+            // Push (row, col) pairs then count, then "q" tag
+            // VM pops: "q", count, then count×(row, col)
+            for &(row, col) in qc {
+                self = self.ps_u32(row as u32);
+                self = self.ps_u32(col as u32);
+            }
+            self = self.ps_u32(qc.len() as u32);
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("q".to_string()).flatten());
+        }
+
         // Alignment tags (optional)
         if let Some(va) = v_align {
             emit_op(&mut self.bytecode, b'p', b's');
@@ -696,6 +1130,24 @@ impl Program {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(&VsfType::l("j".to_string()).flatten());
         }
+        // Padding (optional)
+        if let Some(pad) = padding {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(pad)).flatten());
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("p".to_string()).flatten());
+        }
+        // Border: grid mask + colour (always paired)
+        if let Some((colour, mask)) = border {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::v(b'b', mask.to_vec()).flatten());
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("g".to_string()).flatten());
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(colour);
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("b".to_string()).flatten());
+        }
         // Styling tags (optional)
         if let Some(alt) = alt_row_bg {
             emit_op(&mut self.bytecode, b'p', b's');
@@ -703,23 +1155,27 @@ impl Program {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(&VsfType::l("a".to_string()).flatten());
         }
-        if let Some(border) = border_colour {
-            emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(border);
-            emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("b".to_string()).flatten());
-        }
         if let Some(header) = header_bg {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(header);
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(&VsfType::l("h".to_string()).flatten());
         }
-        // Per-column widths (optional — omit for all auto-fit. 0 = hidden.)
+        // Per-column widths
         if let Some(ws) = col_widths {
             for &w in ws {
                 emit_op(&mut self.bytecode, b'p', b's');
                 self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(w)).flatten());
+            }
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
+        } else if let Some(fracs) = col_fractions {
+            // Responsive widths — emit {cw} frac {ml} per column
+            for &frac in fracs {
+                emit_op(&mut self.bytecode, b'c', b'w'); // {cw}
+                emit_op(&mut self.bytecode, b'p', b's');
+                self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(frac)).flatten());
+                emit_op(&mut self.bytecode, b'm', b'l'); // {ml}
             }
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
@@ -745,6 +1201,162 @@ impl Program {
         self.bytecode.extend_from_slice(&VsfType::l("r".to_string()).flatten());
 
         // Column count (must come before 'r' and 'd' in parse order, so pushed last)
+        self = self.ps_u32(cols as u32);
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("c".to_string()).flatten());
+
+        // Emit draw_table opcode
+        emit_op(&mut self.bytecode, b't', b'b');
+        self
+    }
+
+    /// Draw a table with mixed cell content (text, buttons, text inputs).
+    /// Headers are always text. Data cells can be any `CellData` type.
+    /// Widget cells push results onto the stack after the table:
+    /// - Button: s44(1) if clicked, s44(0) otherwise
+    /// - TextInput: current text content (string)
+    pub fn draw_table_mixed(
+        mut self,
+        headers: &[&str],
+        rows: &[&[CellData]],
+        text_colour: &[u8],
+        col_fractions: &[f32],
+        header_bg: Option<&[u8]>,
+        border: Option<(&[u8], &[u8])>,
+        alt_row_bg: Option<&[u8]>,
+        h_align: Option<&str>,
+        v_align: Option<&str>,
+        padding: Option<f32>,
+    ) -> Self {
+        let cols = headers.len();
+        let total_rows = 1 + rows.len();
+
+        // Push text colour (base param)
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(text_colour);
+
+        // Tags — pushed top-down, VM pops top-first
+        if let Some(va) = v_align {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l(va.to_string()).flatten());
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("v".to_string()).flatten());
+        }
+        if let Some(ha) = h_align {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l(ha.to_string()).flatten());
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("j".to_string()).flatten());
+        }
+        if let Some(pad) = padding {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(pad)).flatten());
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("p".to_string()).flatten());
+        }
+        if let Some((colour, mask)) = border {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::v(b'b', mask.to_vec()).flatten());
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("g".to_string()).flatten());
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(colour);
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("b".to_string()).flatten());
+        }
+        if let Some(alt) = alt_row_bg {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(alt);
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("a".to_string()).flatten());
+        }
+        if let Some(header) = header_bg {
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(header);
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::l("h".to_string()).flatten());
+        }
+        // Responsive column widths
+        for &frac in col_fractions {
+            emit_op(&mut self.bytecode, b'c', b'w');
+            emit_op(&mut self.bytecode, b'p', b's');
+            self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(frac)).flatten());
+            emit_op(&mut self.bytecode, b'm', b'l');
+        }
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
+
+        // Cell data — headers (always text), then data rows (mixed)
+        for h in headers {
+            self = self.ps_str(h);
+        }
+        for row in rows {
+            for cell in *row {
+                match cell {
+                    CellData::Text(s) => {
+                        self = self.ps_str(s);
+                    }
+                    CellData::Styled { text, colour, size: sz } => {
+                        // Push: text, then optional size, then colour on top
+                        self = self.ps_str(text);
+                        if let Some(s) = sz {
+                            emit_op(&mut self.bytecode, b'p', b's');
+                            self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(*s)).flatten());
+                        }
+                        self = self.ps(colour);
+                    }
+                    CellData::Button { label, colour, id, action } => {
+                        // Push: id, action_url, then rou drawable (label + colour)
+                        self = self.ps_u32(*id);
+                        self = self.ps_str(action);
+                        // Parse colour bytes into VsfType, embed in rou drawable
+                        let mut ptr = 0;
+                        let colour_vsf = vsf::parse::parse(colour, &mut ptr)
+                            .expect("CellData::Button: invalid colour bytes");
+                        let rou = VsfType::rou(
+                            CircleF4E4::ZERO, CircleF4E4::ZERO,
+                            label.to_string(), ButtonVariant::Filled,
+                            Box::new(colour_vsf),
+                        );
+                        emit_op(&mut self.bytecode, b'p', b's');
+                        self.bytecode.extend_from_slice(&rou.flatten());
+                    }
+                    CellData::TextInput { placeholder, colour, id } => {
+                        // Push: id, then roq drawable (placeholder + colour)
+                        self = self.ps_u32(*id);
+                        // Parse colour bytes into VsfType, embed in roq drawable
+                        let mut ptr = 0;
+                        let colour_vsf = vsf::parse::parse(colour, &mut ptr)
+                            .expect("CellData::TextInput: invalid colour bytes");
+                        let roq = VsfType::roq(
+                            CircleF4E4::ZERO, CircleF4E4::ZERO,
+                            placeholder.to_string(),
+                            Box::new(colour_vsf),
+                        );
+                        emit_op(&mut self.bytecode, b'p', b's');
+                        self.bytecode.extend_from_slice(&roq.flatten());
+                    }
+                    CellData::SubTable { headers, rows: sub_rows, col_widths, h_align,
+                                         border, header_bg, alt_row_bg, padding } => {
+                        let roa = build_roa_from_cell_data(
+                            headers, sub_rows, *col_widths, *h_align,
+                            *border, *header_bg, *alt_row_bg, *padding,
+                        );
+                        emit_op(&mut self.bytecode, b'p', b's');
+                        self.bytecode.extend_from_slice(&roa.flatten());
+                    }
+                }
+            }
+        }
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("d".to_string()).flatten());
+
+        // Row count
+        self = self.ps_u32(total_rows as u32);
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(&VsfType::l("r".to_string()).flatten());
+
+        // Column count
         self = self.ps_u32(cols as u32);
         emit_op(&mut self.bytecode, b'p', b's');
         self.bytecode.extend_from_slice(&VsfType::l("c".to_string()).flatten());
@@ -832,6 +1444,161 @@ impl Program {
     /// VSF: {sy}
     pub fn sy(mut self) -> Self {
         emit_op(&mut self.bytecode, b's', b'y');
+        self
+    }
+
+    /// Push canvas width (in RU)
+    /// VSF: {cw}
+    pub fn cw(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'c', b'w');
+        self
+    }
+
+    /// Push canvas height (in RU)
+    /// VSF: {ch}
+    pub fn ch(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'c', b'h');
+        self
+    }
+
+    /// Push aspect ratio (width / height, dimensionless)
+    /// VSF: {ar}
+    pub fn ar(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'a', b'r');
+        self
+    }
+
+    // ==================== INTERACTIVE WIDGETS ====================
+
+    /// Button: draws 1px rect with label, pushes clicked bool
+    /// Stack: font, pos(c44), size(c44), label(string), colour, id(u)
+    /// VSF: {bt}
+    pub fn bt(mut self) -> Self { emit_op(&mut self.bytecode, b'b', b't'); self }
+
+    /// Text input: draws 1px rect with editable text, pushes current text
+    /// Stack: font, pos(c44), size(c44), placeholder(string), colour, id(u)
+    /// VSF: {ti}
+    pub fn ti(mut self) -> Self { emit_op(&mut self.bytecode, b't', b'i'); self }
+
+    /// Convenience: emit a button with all params
+    /// Pushes font(local), pos, size, label, colour, id, then {bt}
+    pub fn draw_button(
+        self,
+        label: &str,
+        pos: (f32, f32),
+        size: (f32, f32),
+        colour: &[u8],
+        id: u32,
+    ) -> Self {
+        self.lg(0) // font from local 0
+            .ps_c44(pos.0, pos.1)
+            .ps_c44(size.0, size.1)
+            .ps_str(label)
+            .ps(colour)
+            .ps_u32(id)
+            .bt()
+    }
+
+    /// Convenience: emit a text input with all params
+    /// Pushes font(local), pos, size, placeholder, colour, id, then {ti}
+    pub fn draw_text_input(
+        self,
+        placeholder: &str,
+        pos: (f32, f32),
+        size: (f32, f32),
+        colour: &[u8],
+        id: u32,
+    ) -> Self {
+        self.lg(0) // font from local 0
+            .ps_c44(pos.0, pos.1)
+            .ps_c44(size.0, size.1)
+            .ps_str(placeholder)
+            .ps(colour)
+            .ps_u32(id)
+            .ti()
+    }
+
+    /// Action: pop URL, pop condition; if condition != 0, queue URL for JS POST
+    /// VSF: {ac}
+    pub fn ac(mut self) -> Self { emit_op(&mut self.bytecode, b'a', b'c'); self }
+
+    /// Convenience: emit a button that triggers an HTTP POST action on click
+    /// Combines draw_button + action — pushes button, then conditionally queues URL
+    pub fn draw_action_button(
+        self,
+        label: &str,
+        action_url: &str,
+        pos: (f32, f32),
+        size: (f32, f32),
+        colour: &[u8],
+        id: u32,
+    ) -> Self {
+        self.draw_button(label, pos, size, colour, id)
+            .ps_str(action_url)
+            .ac()
+    }
+
+    /// Draw a button inside a table cell (consumes geometry pushed by 'q' tag).
+    /// Stack input: font(blob), pos(c44), size(c44), colour
+    /// Rearranges to: font, pos, size, label, colour, id → {bt}
+    /// Pushes: s44(1) if clicked, s44(0) otherwise
+    pub fn cell_button(self, label: &str, id: u32) -> Self {
+        // Stack: font, pos, size, colour
+        // Need:  font, pos, size, label, colour, id
+        self.ps_str(label) // font, pos, size, colour, label
+            .sw()          // font, pos, size, label, colour
+            .ps_u32(id)    // font, pos, size, label, colour, id
+            .bt()          // draws button, pushes clicked(s44)
+    }
+
+    /// Draw a button inside a table cell that triggers an HTTP POST action.
+    /// Consumes geometry pushed by 'q' tag. Pushes nothing (action + click consumed).
+    pub fn cell_action_button(self, label: &str, action_url: &str, id: u32) -> Self {
+        self.cell_button(label, id)
+            .ps_str(action_url)
+            .ac()
+    }
+
+    /// Draw a button inside a table cell with a custom colour (overrides table colour).
+    /// Stack input: font(blob), pos(c44), size(c44), table_colour
+    /// Drops table_colour, uses provided colour instead.
+    pub fn cell_button_coloured(mut self, label: &str, colour: &[u8], id: u32) -> Self {
+        // Stack: font, pos, size, table_colour
+        // Drop table_colour, push custom colour
+        self = self.pp(); // font, pos, size  (table_colour popped)
+        self = self.ps_str(label); // font, pos, size, label
+        emit_op(&mut self.bytecode, b'p', b's');
+        self.bytecode.extend_from_slice(colour);  // font, pos, size, label, colour
+        self = self.ps_u32(id); // font, pos, size, label, colour, id
+        self.bt()
+    }
+
+    /// Draw an action button inside a table cell with a custom colour.
+    pub fn cell_action_button_coloured(self, label: &str, action_url: &str, colour: &[u8], id: u32) -> Self {
+        self.cell_button_coloured(label, colour, id)
+            .ps_str(action_url)
+            .ac()
+    }
+
+    /// Draw a text input inside a table cell (consumes geometry pushed by 'q' tag).
+    /// Stack input: font(blob), pos(c44), size(c44), colour
+    /// Rearranges to: font, pos, size, placeholder, colour, id → {ti}
+    /// Pushes: current text content (string)
+    pub fn cell_text_input(self, placeholder: &str, id: u32) -> Self {
+        // Stack: font, pos, size, colour
+        // Need:  font, pos, size, placeholder, colour, id
+        self.ps_str(placeholder)
+            .sw()
+            .ps_u32(id)
+            .ti()
+    }
+
+    // ==================== ERROR HANDLING ====================
+
+    /// Guard — pop condition; halt if zero
+    /// VSF: {gd}
+    pub fn gd(mut self) -> Self {
+        emit_op(&mut self.bytecode, b'g', b'd');
         self
     }
 

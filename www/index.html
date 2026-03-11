@@ -190,6 +190,22 @@
             border-color: #4a9eff;
             background: rgba(255, 255, 255, 0.1);
         }
+
+        .console-handle-go {
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            background: rgba(74, 158, 255, 0.1);
+            color: #4a9eff;
+            border: 1px solid #4a9eff44;
+            border-radius: 2px;
+            padding: 2px 6px;
+            cursor: pointer;
+            line-height: 1;
+        }
+
+        .console-handle-go:hover {
+            background: rgba(74, 158, 255, 0.2);
+        }
     </style>
 </head>
 <body>
@@ -201,7 +217,8 @@
             <span class="colour-hex" id="colourHex">── ── ── ──</span>
             <span class="colour-coords" id="colourCoords">x:─── y:───</span>
             <div class="console-toolbar">
-                <input type="text" id="consoleHandle" class="console-handle" placeholder="handle..." autocomplete="off" />
+                <input type="text" id="consoleHandle" class="console-handle" placeholder="enter handle ↵" autocomplete="off" />
+                <button class="console-handle-go" id="consoleHandleGo" title="Load handle">→</button>
                 <span class="pipeline-label" id="pipelineLabel">pipeline: fast</span>
                 <button class="console-btn" id="pipelineToggleBtn" onclick="togglePipeline()">toggle pipeline</button>
             </div>
@@ -210,7 +227,7 @@
     </div>
 
     <div class="handle-input" id="handleInput">
-        <input type="text" id="handleField" placeholder="Enter handle (e.g. 'red box test')" autocomplete="off" />
+        <input type="text" id="handleField" placeholder="enter handle ↵" autocomplete="off" />
         <div class="handle-hint">Type a handle name and press Enter to resolve and render</div>
     </div>
 

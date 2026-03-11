@@ -372,10 +372,38 @@ pub enum Opcode {
     /// VSF: {oy}
     mouse_y,
 
+    /// Push canvas width (in RU)
+    /// VSF: {cw}
+    canvas_w,
+
+    /// Push canvas height (in RU)
+    /// VSF: {ch}
+    canvas_h,
+
+    /// Push aspect ratio (width / height, dimensionless)
+    /// VSF: {ar}
+    aspect_ratio,
+
+    // ==================== INTERACTIVE WIDGETS ====================
+    /// Button: pop id(u), colour, label(string), size(c44), pos(c44), font; push clicked(bool as s44)
+    /// Draws 1px hairline rect with centered label. Registers hit region.
+    /// VSF: {bt}
+    button,
+
+    /// Text input: pop id(u), colour, placeholder(string), size(c44), pos(c44), font; push text(string)
+    /// Draws 1px hairline rect with editable text, cursor, selection. Registers hit region.
+    /// VSF: {ti}
+    text_input,
+
+    /// Action: pop url(string), condition(s44/u); if condition != 0, queue URL for JS
+    /// Used with buttons to trigger HTTP POST actions from capsules.
+    /// VSF: {ac}
+    action,
+
     // ==================== ERROR HANDLING ====================
     /// Pop condition; halt if zero
-    /// VSF: {ar}
-    assert,
+    /// VSF: {gd}
+    guard,
 
     /// Stop execution immediately
     /// VSF: {hl}
@@ -526,10 +554,18 @@ impl Opcode {
             0x7379 => Some(Self::scroll_y), // sy
             0x6f78 => Some(Self::mouse_x),  // ox
             0x6f79 => Some(Self::mouse_y),  // oy
+            0x6377 => Some(Self::canvas_w), // cw
+            0x6368 => Some(Self::canvas_h), // ch
+            0x6172 => Some(Self::aspect_ratio), // ar
+
+            // Interactive widgets
+            0x6274 => Some(Self::button),     // bt
+            0x7469 => Some(Self::text_input), // ti
+            0x6163 => Some(Self::action),     // ac
 
             // Error handling
-            0x6172 => Some(Self::assert), // ar
-            0x686c => Some(Self::halt),   // hl
+            0x6764 => Some(Self::guard), // gd
+            0x686c => Some(Self::halt),  // hl
 
             // Debug
             0x6462 => Some(Self::debug_print), // db
@@ -653,7 +689,13 @@ impl Opcode {
             Self::scroll_y => *b"sy",
             Self::mouse_x => *b"ox",
             Self::mouse_y => *b"oy",
-            Self::assert => *b"ar",
+            Self::canvas_w => *b"cw",
+            Self::canvas_h => *b"ch",
+            Self::aspect_ratio => *b"ar",
+            Self::button => *b"bt",
+            Self::text_input => *b"ti",
+            Self::action => *b"ac",
+            Self::guard => *b"gd",
             Self::halt => *b"hl",
             Self::debug_print => *b"db",
             Self::debug_stack => *b"ds",

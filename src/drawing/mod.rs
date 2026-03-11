@@ -157,6 +157,45 @@ impl Canvas {
         }
     }
 
+    /// Draw a 1px horizontal line (no AA — fast path)
+    pub fn hline_ru(&mut self, y: ScalarF4E4, x0: ScalarF4E4, x1: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
+        match self {
+            Canvas::Fast(c) => {
+                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
+                c.hline_ru(y, x0, x1, u32_colour);
+                Ok(())
+            }
+            Canvas::Quality(_c) => Ok(()),
+        }
+    }
+
+    /// Draw a 1px vertical line (no AA — fast path)
+    pub fn vline_ru(&mut self, x: ScalarF4E4, y0: ScalarF4E4, y1: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
+        match self {
+            Canvas::Fast(c) => {
+                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
+                c.vline_ru(x, y0, y1, u32_colour);
+                Ok(())
+            }
+            Canvas::Quality(_c) => Ok(()),
+        }
+    }
+
+    /// Draw a 1px axis-aligned rectangle outline (no AA — fast path for borders)
+    pub fn stroke_rect_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, colour: &vsf::VsfType) -> Result<(), String> {
+        match self {
+            Canvas::Fast(c) => {
+                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
+                c.stroke_rect_ru(pos, size, u32_colour);
+                Ok(())
+            }
+            Canvas::Quality(_c) => {
+                // TODO: quality path for stroke_rect_ru
+                Ok(())
+            }
+        }
+    }
+
     pub fn fill_rotated_rect_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, angle: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
         match self {
             Canvas::Fast(c) => {

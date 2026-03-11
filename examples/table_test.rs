@@ -2,7 +2,7 @@
 //!
 //! Exercises the {tb} draw_table opcode with header, borders, alt rows.
 
-use toka::builder::Program;
+use toka::builder::{CellData, GridMaskBuilder, Program};
 use toka::capsule::CapsuleBuilder;
 use vsf::handle;
 use vsf::types::VsfType;
@@ -14,6 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let header_bg = VsfType::ra([40, 50, 80, 255]).flatten();
     let border = VsfType::ra([80, 80, 80, 255]).flatten();
     let alt_bg = VsfType::ra([35, 35, 40, 255]).flatten();
+    let grid = GridMaskBuilder::full(6, 3).build(); // 1 header + 5 data rows, 3 cols
 
     let p = Program::new()
         .la(1)
@@ -41,11 +42,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 &["Eve", "Security", "Active"],
             ],
             &white,
-            Some(&[0.15, 0.4, 0.15]),  // explicit widths, center wraps
+            Some(&[0.15, 0.4, 0.15]),
             Some(&header_bg),
-            Some(&border),
+            Some((&border, &grid)),
             Some(&alt_bg),
             Some("lcr"),
+            None,
+        )
+        // Sub-table test: outer 2-col table with nested tables in cells
+        .lg(0)
+        .ps_c44(0.0, 0.10)
+        .ps_s44(0.025)
+        .draw_table_mixed(
+            &["Section A", "Section B"],
+            &[&[
+                CellData::SubTable {
+                    headers: &["Item", "Qty"],
+                    rows: &[
+                        &[CellData::Text("Apples"), CellData::Text("12")],
+                        &[CellData::Text("Bananas"), CellData::Text("7")],
+                        &[CellData::Text("Cherries"), CellData::Text("42")],
+                    ],
+                    col_widths: None,
+                    h_align: Some("lr"),
+                    border: Some((&border, &GridMaskBuilder::full(4, 2).build())),
+                    header_bg: Some(&header_bg),
+                    alt_row_bg: Some(&alt_bg),
+                    padding: Some(0.003),
+                },
+                CellData::SubTable {
+                    headers: &["Name", "Score"],
+                    rows: &[
+                        &[CellData::Text("Alice"), CellData::Text("98")],
+                        &[CellData::Text("Bob"), CellData::Text("85")],
+                    ],
+                    col_widths: None,
+                    h_align: Some("lr"),
+                    border: Some((&border, &GridMaskBuilder::full(3, 2).build())),
+                    header_bg: Some(&header_bg),
+                    alt_row_bg: None,
+                    padding: Some(0.003),
+                },
+            ]],
+            &white,
+            &[0.35, 0.35],
+            Some(&header_bg),
+            Some((&border, &GridMaskBuilder::full(2, 2).build())),
+            None,
+            Some("cc"),
+            None,
             None,
         )
         .hl();

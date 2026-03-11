@@ -55,6 +55,64 @@ impl CanvasFast {
         }
     }
 
+    /// Draw a 1px horizontal line (no AA) — RU coordinates, center-origin
+    pub fn hline_ru(&mut self, y: ScalarF4E4, x0: ScalarF4E4, x1: ScalarF4E4, colour: u32) {
+        let span_ru = self.coords.span * self.coords.ru;
+        let half_w = self.coords.half_dims.r();
+        let half_h = self.coords.half_dims.i();
+        let py = (half_h + y * span_ru).to_isize();
+        if py < 0 || py >= self.coords.height as isize { return; }
+        let px0 = (half_w + x0 * span_ru).to_isize().clamp(0, self.coords.width as isize) as usize;
+        let px1 = (half_w + x1 * span_ru).to_isize().clamp(0, self.coords.width as isize) as usize;
+        let row = py as usize * self.coords.width;
+        let alpha = colour as u8;
+        if alpha == 255 {
+            self.pixels[row + px0..row + px1].fill(colour);
+        } else {
+            for px in px0..px1 {
+                self.pixels[row + px] = Self::blend(colour, self.pixels[row + px], alpha);
+            }
+        }
+    }
+
+    /// Draw a 1px vertical line (no AA) — RU coordinates, center-origin
+    pub fn vline_ru(&mut self, x: ScalarF4E4, y0: ScalarF4E4, y1: ScalarF4E4, colour: u32) {
+        let span_ru = self.coords.span * self.coords.ru;
+        let half_w = self.coords.half_dims.r();
+        let half_h = self.coords.half_dims.i();
+        let px = (half_w + x * span_ru).to_isize();
+        if px < 0 || px >= self.coords.width as isize { return; }
+        let py0 = (half_h + y0 * span_ru).to_isize().clamp(0, self.coords.height as isize) as usize;
+        let py1 = (half_h + y1 * span_ru).to_isize().clamp(0, self.coords.height as isize) as usize;
+        let px = px as usize;
+        let w = self.coords.width;
+        let alpha = colour as u8;
+        if alpha == 255 {
+            for py in py0..py1 {
+                self.pixels[py * w + px] = colour;
+            }
+        } else {
+            for py in py0..py1 {
+                let idx = py * w + px;
+                self.pixels[idx] = Self::blend(colour, self.pixels[idx], alpha);
+            }
+        }
+    }
+
+    /// Draw a 1px axis-aligned rectangle outline (no AA) — RU coordinates, center-origin
+    pub fn stroke_rect_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, colour: u32) {
+        let half_w = size.r() >> 1usize;
+        let half_h = size.i() >> 1usize;
+        let left = pos.r() - half_w;
+        let right = pos.r() + half_w;
+        let top = pos.i() - half_h;
+        let bottom = pos.i() + half_h;
+        self.hline_ru(top, left, right, colour);     // top
+        self.hline_ru(bottom, left, right, colour);   // bottom
+        self.vline_ru(left, top, bottom, colour);     // left
+        self.vline_ru(right, top, bottom, colour);    // right
+    }
+
     /// Fill a rotated rectangle with sub-pixel AA on all edges (RU coordinates, center-origin)
     pub fn fill_rotated_rect_ru(
         &mut self,

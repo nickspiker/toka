@@ -193,10 +193,6 @@ pub fn extract_colour_u32(vsf: &VsfType) -> Result<u32, String> {
     };
 
     let packed = ((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | (a as u32);
-
-    #[cfg(target_arch = "wasm32")]
-    crate::wasm::js_log(&format!("extract_colour_u32: r={} g={} b={} a={} → {:08X}", r, g, b, a, packed), "info");
-
     Ok(packed)
 }
 

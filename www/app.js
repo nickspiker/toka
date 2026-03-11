@@ -25,6 +25,14 @@ function log(message, type = 'info') {
     consoleEl.scrollTop = consoleEl.scrollHeight;
 }
 
+// Intercept console.log so WASM debug output appears in the portal console
+const _origLog = console.log;
+console.log = function(...args) {
+    _origLog.apply(console, args);
+    const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+    if (msg) log(msg, 'info');
+};
+
 // Expose log to WASM (wasm-bindgen needs it in global scope)
 window.log = log;
 
@@ -39,14 +47,16 @@ async function init() {
         log('Starting WASM initialization...', 'info');
         setStatus('Loading WASM module...');
 
-        // Import the WASM module with cache-busting timestamp
+        // Detect path base: local dev uses ./pkg/, fgtw.org uses /static/
+        const isRemote = location.pathname.startsWith('/static/') || location.hostname.endsWith('fgtw.org');
+        const base = isRemote ? '/static/' : './pkg/';
         const cacheBust = Date.now();
-        log(`Importing module from ./pkg/toka.js?v=${cacheBust}`, 'info');
-        const module = await import(`./pkg/toka.js?v=${cacheBust}`);
+        log(`Importing module from ${base}toka.js?v=${cacheBust}`, 'info');
+        const module = await import(`${base}toka.js?v=${cacheBust}`);
         log('Module imported successfully', 'info');
 
         // Initialize WASM with cache-busted binary URL
-        const wasmUrl = `./pkg/toka_bg.wasm?v=${cacheBust}`;
+        const wasmUrl = `${base}toka_bg.wasm?v=${cacheBust}`;
         log(`Calling module.default() with ${wasmUrl}...`, 'info');
         await module.default(wasmUrl);
         log('WASM initialized successfully', 'info');
@@ -172,17 +182,9 @@ function setupScrollTracking() {
         accumulatedScrollY += e.deltaY;
         console.log(`[WHEEL] deltaY=${e.deltaY}, accumulated=${accumulatedScrollY}`);
 
-        // Update VM scroll state
+        // Update VM scroll state and re-render (preserves widget state)
         currentVM.set_scroll(0, accumulatedScrollY);
-
-        // Re-run bytecode with new scroll value
-        try {
-            currentVM.reset();  // Reset IP to start
-            while (currentVM.run(256)) {}  // Run to completion in chunks
-            render();
-        } catch (err) {
-            log(`Wheel render error: ${err}`, 'error');
-        }
+        interactiveRerender();
     }
 
     window.addEventListener('wheel', handleWheel, { passive: true });
@@ -200,9 +202,9 @@ async function resolveHandle(handleName) {
         // Run memory-hard proof to get deterministic filename
         log('Computing handle proof (this takes a few seconds)...', 'info');
         const filename = wasmModule.resolve_handle(normalized);
-        log(`Proof complete → capsules/${filename}`, 'info');
+        log(`Proof complete → /${filename}`, 'info');
 
-        const response = await fetch(`capsules/${filename}`);
+        const response = await fetch(`/${filename}?v=${Date.now()}`);
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -265,9 +267,14 @@ async function loadAndRenderCapsule(handleName) {
 
     currentBytecode = bytecode;  // Save for resize
     reactiveRender();
+
+    // Hide status bar once capsule is displayed
+    const statusBar = document.querySelector('.status-bar');
+    if (statusBar) statusBar.style.display = 'none';
 }
 
 // Reactive rendering - re-executes program with current viewport dimensions
+// Creates a new VM (used for initial load and resize — loses widget state)
 function reactiveRender() {
     if (!currentBytecode) return;
 
@@ -293,6 +300,7 @@ function reactiveRender() {
                 log(`Executed ${trace.length} opcodes: ${trace.join(' → ')}`, 'info');
             }
 
+            currentVM.drain_events();
             render();
             log('Rendered successfully', 'info');
         } catch (err) {
@@ -305,6 +313,118 @@ function reactiveRender() {
             }
         }
     }
+}
+
+// Interactive re-render — re-executes bytecode on existing VM (preserves widget state)
+// Used after mouse/keyboard events so text input state, focus, etc. survive
+function interactiveRerender() {
+    if (!currentVM || !currentBytecode) return;
+    try {
+        currentVM.rerun(currentBytecode);
+        currentVM.drain_events();
+        render();
+
+        // Process triggered actions (button clicks that queue HTTP POSTs)
+        const actionsJson = currentVM.drain_actions();
+        if (actionsJson && actionsJson !== '[]') {
+            const actions = JSON.parse(actionsJson);
+            for (const url of actions) {
+                log(`Action: POST ${url}`, 'info');
+                fetch(url, { method: 'POST' }).then(resp => {
+                    if (resp.ok) {
+                        log(`Action OK: ${url}`, 'info');
+                        // Reload capsule to reflect changes
+                        setTimeout(() => location.reload(), 500);
+                    } else {
+                        log(`Action failed: ${resp.status} ${url}`, 'error');
+                    }
+                }).catch(err => log(`Action error: ${err}`, 'error'));
+            }
+        }
+    } catch (err) {
+        log(`Interactive render error: ${err}`, 'error');
+    }
+}
+
+// Convert page coordinates to RU (render units, center-origin)
+function pageToRU(pageX, pageY) {
+    const w = currentVM.width();
+    const h = currentVM.height();
+    const span = currentVM.get_span();
+    const ru = currentVM.get_ru();
+    // Pixel offset from center, then convert to RU
+    const x = (pageX - w / 2) / (span * ru);
+    const y = (pageY - h / 2) / (span * ru);
+    return [x, y];
+}
+
+// Setup interactive event handling (mouse + keyboard → VM)
+function setupInteraction() {
+    // ── Mouse ──────────────────────────────────────────
+
+    canvas.addEventListener('mousemove', (e) => {
+        if (!currentVM) return;
+        const [rx, ry] = pageToRU(e.offsetX, e.offsetY);
+        currentVM.set_mouse(rx, ry);
+
+        // Update CSS cursor based on hit regions
+        const cursor = currentVM.cursor_at(rx, ry);
+        canvas.style.cursor = cursor;
+    });
+
+    canvas.addEventListener('mousedown', (e) => {
+        if (!currentVM) return;
+        const [rx, ry] = pageToRU(e.offsetX, e.offsetY);
+        currentVM.push_mouse_down(rx, ry);
+        interactiveRerender();
+
+        // Update cursor after click (focus may have changed)
+        canvas.style.cursor = currentVM.cursor_at(rx, ry);
+    });
+
+    canvas.addEventListener('mouseup', (e) => {
+        if (!currentVM) return;
+        const [rx, ry] = pageToRU(e.offsetX, e.offsetY);
+        currentVM.push_mouse_up(rx, ry);
+        interactiveRerender();
+    });
+
+    // ── Keyboard ───────────────────────────────────────
+
+    // Only forward keyboard events when a toka widget has focus
+    // (not when typing in HTML inputs like the handle field or console)
+    window.addEventListener('keydown', (e) => {
+        if (!currentVM) return;
+        // Don't intercept if an HTML input/textarea is focused
+        const active = document.activeElement;
+        if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+        // Only forward if a toka widget has focus
+        if (currentVM.focused_widget() < 0) return;
+
+        // Special keys → push_key_down
+        const specialKeys = ['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Tab', 'Escape', 'Enter'];
+        if (specialKeys.includes(e.key)) {
+            e.preventDefault();
+            currentVM.push_key_down(e.key);
+            interactiveRerender();
+        }
+    });
+
+    window.addEventListener('keypress', (e) => {
+        if (!currentVM) return;
+        const active = document.activeElement;
+        if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+        if (currentVM.focused_widget() < 0) return;
+
+        // Printable characters → push_key_press
+        if (e.key.length === 1) {
+            e.preventDefault();
+            currentVM.push_key_press(e.key);
+            interactiveRerender();
+        }
+    });
+
+    log('Interactive event handling enabled', 'info');
 }
 
 // Setup handle input (both modal overlay and console toolbar)
@@ -329,18 +449,24 @@ function setupHandleInput() {
 
     // Console toolbar handle input (always available)
     const consoleHandle = document.getElementById('consoleHandle');
+    const loadConsoleHandle = async () => {
+        if (!consoleHandle) return;
+        const handle = consoleHandle.value.trim();
+        if (handle) {
+            log(`Loading: ${handle}`, 'info');
+            if (handleInput) handleInput.classList.add('hidden');
+            consoleHandle.value = '';
+            await loadAndRenderCapsule(handle);
+        }
+    };
     if (consoleHandle) {
         consoleHandle.addEventListener('keypress', async (e) => {
-            if (e.key === 'Enter') {
-                const handle = consoleHandle.value.trim();
-                if (handle) {
-                    log(`Loading: ${handle}`, 'info');
-                    if (handleInput) handleInput.classList.add('hidden');
-                    consoleHandle.value = '';
-                    await loadAndRenderCapsule(handle);
-                }
-            }
+            if (e.key === 'Enter') await loadConsoleHandle();
         });
+    }
+    const consoleHandleGo = document.getElementById('consoleHandleGo');
+    if (consoleHandleGo) {
+        consoleHandleGo.addEventListener('click', loadConsoleHandle);
     }
 
     log('Handle input ready', 'info');
@@ -370,6 +496,7 @@ async function main() {
     log('Application starting...', 'info');
     setupCanvas();
     setupScrollTracking();
+    setupInteraction();
     await init();
     setupHandleInput();
     log('Toka VM ready - enter a handle name', 'info');
