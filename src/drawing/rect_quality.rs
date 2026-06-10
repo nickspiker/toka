@@ -39,7 +39,8 @@ impl CanvasQuality {
         angle: ScalarF4E4,
         colour: Pixel,
     ) {
-        let center = self.half_dims() + pos * self.span() * self.ru();
+        let scrolled = CircleF4E4::from((pos.r(), pos.i() - self.scroll_y()));
+        let center = self.half_dims() + scrolled * self.span() * self.ru();
         let half: CircleF4E4 = (size * self.span() * self.ru()) >> 1;
 
         self.fill_rect_aa(center, half, angle, colour);

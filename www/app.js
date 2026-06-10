@@ -139,12 +139,21 @@ function setupCanvas() {
         // This prevents black flash during resize
     }
 
-    // Resize handler - full rerun to ensure all post-scene ops (draw_text etc.) execute
+    // Resize handler — resize canvas + rerun, preserving widget state (text inputs, focus)
     function handleResize() {
         const newWidth = window.innerWidth;
         const newHeight = window.innerHeight;
 
-        if (currentBytecode) {
+        if (currentBytecode && currentVM) {
+            canvas.width = newWidth;
+            canvas.height = newHeight;
+            stopBlinkey();
+            currentVM.resize(newWidth, newHeight);
+            currentVM.rerun(currentBytecode);
+            currentVM.drain_events();
+            render();
+            if (currentVM.focused_widget() >= 0) startBlinkey();
+        } else if (currentBytecode) {
             canvas.width = newWidth;
             canvas.height = newHeight;
             reactiveRender();
@@ -173,22 +182,23 @@ function setupCanvas() {
 
 // Setup scroll tracking for reactive scenes
 function setupScrollTracking() {
-    let accumulatedScrollY = 0;
-
     function handleWheel(e) {
-        if (!currentVM) return;
-
-        // Accumulate wheel delta
-        accumulatedScrollY += e.deltaY;
-        console.log(`[WHEEL] deltaY=${e.deltaY}, accumulated=${accumulatedScrollY}`);
-
-        // Update VM scroll state and re-render (preserves widget state)
-        currentVM.set_scroll(0, accumulatedScrollY);
-        interactiveRerender();
+        if (!currentVM || !currentBytecode) return;
+        e.preventDefault();
+        const delta = Math.round(e.deltaY);
+        if (delta === 0) return;
+        // Shift pixels + set clip to exposed strip
+        currentVM.scroll_by(delta);
+        // Show shifted buffer immediately
+        render();
+        // Rerun draws only into the clipped strip
+        currentVM.rerun(currentBytecode);
+        currentVM.clear_clip();
+        render();
     }
 
-    window.addEventListener('wheel', handleWheel, { passive: true });
-    log('Wheel tracking enabled', 'info');
+    canvas.addEventListener('wheel', handleWheel, { passive: false });
+    log('Scroll tracking enabled', 'info');
 }
 
 // Handle resolution via memory-hard proof-of-work
@@ -202,6 +212,7 @@ async function resolveHandle(handleName) {
         // Run memory-hard proof to get deterministic filename
         log('Computing handle proof (this takes a few seconds)...', 'info');
         const filename = wasmModule.resolve_handle(normalized);
+        currentCapsuleAddress = filename.replace('.vsf', '');
         log(`Proof complete → /${filename}`, 'info');
 
         const response = await fetch(`/${filename}?v=${Date.now()}`);
@@ -240,6 +251,7 @@ async function resolveHandle(handleName) {
 }
 
 let currentBytecode = null;  // Store bytecode for reactive rendering
+let currentCapsuleAddress = null;  // base64url filename = action POST endpoint
 
 // Load a capsule directly by URL (no handle resolution)
 async function loadDirect(url) {
@@ -252,6 +264,10 @@ async function loadDirect(url) {
 
         const bytecode = wasmModule.load_capsule(capsuleData);
         log(`Extracted ${bytecode.length} bytes of bytecode`, 'info');
+
+        // Extract capsule address from URL path
+        const path = new URL(url, location.origin).pathname;
+        currentCapsuleAddress = path.split('/').pop().split('?')[0].replace('.vsf', '');
 
         currentBytecode = bytecode;
         reactiveRender();
@@ -315,34 +331,85 @@ function reactiveRender() {
     }
 }
 
-// Interactive re-render — re-executes bytecode on existing VM (preserves widget state)
-// Used after mouse/keyboard events so text input state, focus, etc. survive
+// Full interactive re-render — re-executes entire bytecode (preserves widget state)
+// Used for mouse clicks (buttons need post-table stack processing for actions)
 function interactiveRerender() {
     if (!currentVM || !currentBytecode) return;
     try {
+        stopBlinkey();
         currentVM.rerun(currentBytecode);
         currentVM.drain_events();
         render();
-
-        // Process triggered actions (button clicks that queue HTTP POSTs)
-        const actionsJson = currentVM.drain_actions();
-        if (actionsJson && actionsJson !== '[]') {
-            const actions = JSON.parse(actionsJson);
-            for (const url of actions) {
-                log(`Action: POST ${url}`, 'info');
-                fetch(url, { method: 'POST' }).then(resp => {
-                    if (resp.ok) {
-                        log(`Action OK: ${url}`, 'info');
-                        // Reload capsule to reflect changes
-                        setTimeout(() => location.reload(), 500);
-                    } else {
-                        log(`Action failed: ${resp.status} ${url}`, 'error');
-                    }
-                }).catch(err => log(`Action error: ${err}`, 'error'));
-            }
-        }
+        processActions();
+        if (currentVM.focused_widget() >= 0) startBlinkey();
     } catch (err) {
         log(`Interactive render error: ${err}`, 'error');
+    }
+}
+
+// Differential widget rerender — only redraws widget regions, skips full VM execution
+// Used for keystrokes and cursor updates (order of magnitude faster)
+function widgetRerender() {
+    if (!currentVM) return;
+    try {
+        if (currentVM.has_widget_snapshots()) {
+            stopBlinkey();
+            currentVM.rerun_widgets();
+            render();
+            if (currentVM.focused_widget() >= 0) startBlinkey();
+        } else {
+            // Fallback to full rerender if no snapshots (first frame etc.)
+            interactiveRerender();
+        }
+    } catch (err) {
+        log(`Widget render error: ${err}`, 'error');
+    }
+}
+
+// Blinkey cursor animation — flips wave every ~200ms (randomized for organic feel)
+let blinkeyTimer = null;
+function startBlinkey() {
+    stopBlinkey();
+    function tick() {
+        if (!currentVM) return;
+        try {
+            currentVM.flip_blinkey();
+            render();
+        } catch (e) { /* ignore */ }
+        // Random interval 100-350ms for organic feel
+        blinkeyTimer = setTimeout(tick, 100 + Math.random() * 250);
+    }
+    blinkeyTimer = setTimeout(tick, 200);
+}
+function stopBlinkey() {
+    if (blinkeyTimer) {
+        clearTimeout(blinkeyTimer);
+        blinkeyTimer = null;
+    }
+}
+
+// Process triggered actions from button clicks
+function processActions() {
+    if (!currentVM || !currentCapsuleAddress) return;
+    const endpoint = `/${currentCapsuleAddress}`;
+    while (true) {
+        const bytes = currentVM.drain_action();
+        if (bytes.length === 0) break;
+        const nullIdx = bytes.indexOf(0);
+        const section = nullIdx >= 0
+            ? new TextDecoder().decode(bytes.slice(0, nullIdx))
+            : new TextDecoder().decode(bytes);
+        log(`Action: ${section} → ${endpoint}`, 'info');
+        fetch(endpoint, {
+            method: 'POST',
+            body: bytes,
+        }).then(resp => {
+            if (resp.ok) {
+                log(`Action OK: ${section}`, 'info');
+            } else {
+                log(`Action failed: ${resp.status} ${section}`, 'error');
+            }
+        }).catch(err => log(`Action error: ${err}`, 'error'));
     }
 }
 
@@ -401,12 +468,20 @@ function setupInteraction() {
         // Only forward if a toka widget has focus
         if (currentVM.focused_widget() < 0) return;
 
+        // Let Ctrl/Cmd shortcuts pass through to browser (paste handled by paste event)
+        if (e.ctrlKey || e.metaKey) return;
+
         // Special keys → push_key_down
-        const specialKeys = ['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Tab', 'Escape', 'Enter'];
-        if (specialKeys.includes(e.key)) {
+        const specialKeys = ['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'Tab', 'Escape'];
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            currentVM.push_key_press('\n');
+            widgetRerender();
+            requestAnimationFrame(() => interactiveRerender());
+        } else if (specialKeys.includes(e.key)) {
             e.preventDefault();
             currentVM.push_key_down(e.key);
-            interactiveRerender();
+            widgetRerender();
         }
     });
 
@@ -420,7 +495,22 @@ function setupInteraction() {
         if (e.key.length === 1) {
             e.preventDefault();
             currentVM.push_key_press(e.key);
-            interactiveRerender();
+            widgetRerender();
+        }
+    });
+
+    // Paste — covers Ctrl+V and right-click paste
+    window.addEventListener('paste', (e) => {
+        if (!currentVM) return;
+        const active = document.activeElement;
+        if (active && (active.tagName === 'INPUT' || active.tagName === 'TEXTAREA')) return;
+        if (currentVM.focused_widget() < 0) return;
+
+        e.preventDefault();
+        const text = (e.clipboardData || window.clipboardData).getData('text');
+        if (text) {
+            currentVM.push_key_press(text);
+            widgetRerender();
         }
     });
 
@@ -491,6 +581,47 @@ function togglePipeline() {
 }
 window.togglePipeline = togglePipeline;
 
+// Load capsule from raw bytes (used by WebSocket push)
+function loadCapsuleBytes(capsuleData) {
+    try {
+        const bytecode = wasmModule.load_capsule(capsuleData);
+        log(`Extracted ${bytecode.length} bytes of executable bytecode`, 'info');
+        currentBytecode = bytecode;
+        reactiveRender();
+    } catch (err) {
+        log(`Failed to load pushed capsule: ${err}`, 'error');
+    }
+}
+
+// WebSocket connection for live capsule updates
+function setupWebSocket() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${proto}//${location.host}/ws`;
+    log(`WebSocket connecting: ${wsUrl}`, 'info');
+
+    const ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => log('WebSocket connected', 'info');
+
+    ws.onmessage = (event) => {
+        if (event.data instanceof ArrayBuffer) {
+            const bytes = new Uint8Array(event.data);
+            log(`WebSocket: received ${bytes.length} bytes`, 'info');
+            loadCapsuleBytes(bytes);
+        }
+    };
+
+    ws.onclose = () => {
+        log('WebSocket closed, reconnecting in 3s...', 'info');
+        setTimeout(setupWebSocket, 3000);
+    };
+
+    ws.onerror = (err) => {
+        log(`WebSocket error`, 'error');
+    };
+}
+
 // Main entry point
 async function main() {
     log('Application starting...', 'info');
@@ -499,6 +630,7 @@ async function main() {
     setupInteraction();
     await init();
     setupHandleInput();
+    setupWebSocket();
     log('Toka VM ready - enter a handle name', 'info');
 }
 

@@ -39,6 +39,8 @@ impl CanvasFast {
 
         let width = self.coords.width as isize;
         let height = self.coords.height as isize;
+        let clip_min = self.coords.clip_y_min as isize;
+        let clip_max = self.coords.clip_y_max as isize;
         let steep = (y1 - y0).magnitude() > (x1 - x0).magnitude();
 
         if steep {
@@ -58,8 +60,8 @@ impl CanvasFast {
         let pixels = &mut self.pixels;
         let mut plot = |x: isize, y: isize, coverage: ScalarF4E4| {
             let (px, py) = if steep { (y, x) } else { (x, y) };
-            if px < 0 || px >= width || py < 0 || py >= height { return; }
-            let alpha = (coverage * ScalarF4E4::from(255)).to_isize().clamp(0, 255) as u8;
+            if px < 0 || px >= width || py < clip_min || py >= clip_max { return; }
+            let alpha = (coverage * 255i32).to_isize().clamp(0, 255) as u8;
             if alpha == 0 { return; }
             let idx = py as usize * width as usize + px as usize;
             pixels[idx] = CanvasFast::blend(colour, pixels[idx], alpha);
@@ -123,13 +125,14 @@ impl CanvasFast {
         let extend = radius / seg_len;
 
         let canvas_w = self.coords.width as isize;
-        let canvas_h = self.coords.height as isize;
+        let clip_min = self.coords.clip_y_min as isize;
+        let clip_max = self.coords.clip_y_max as isize;
 
         let margin = r_px + 2;
         let min_x = (x0.to_isize().min(x1.to_isize()) - margin).max(0);
         let max_x = (x0.to_isize().max(x1.to_isize()) + margin).min(canvas_w - 1);
-        let min_y = (y0.to_isize().min(y1.to_isize()) - margin).max(0);
-        let max_y = (y0.to_isize().max(y1.to_isize()) + margin).min(canvas_h - 1);
+        let min_y = (y0.to_isize().min(y1.to_isize()) - margin).max(clip_min);
+        let max_y = (y0.to_isize().max(y1.to_isize()) + margin).min(clip_max - 1);
 
         let far = radius + ScalarF4E4::ONE + ScalarF4E4::ONE;
 
@@ -186,7 +189,7 @@ impl CanvasFast {
                 let coverage = (radius + half - dist).clamp(ScalarF4E4::ZERO, ScalarF4E4::ONE);
                 if !coverage.is_positive() { continue; }
 
-                let alpha = (coverage * ScalarF4E4::from(255)).to_isize().clamp(0, 255) as u8;
+                let alpha = (coverage * 255i32).to_isize().clamp(0, 255) as u8;
                 if alpha == 0 { continue; }
 
                 let idx = py as usize * canvas_w as usize + px as usize;

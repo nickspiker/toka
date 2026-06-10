@@ -187,7 +187,7 @@ pub fn extract_colour_u32(vsf: &VsfType) -> Result<u32, String> {
         VsfType::rt([_, _, _, a]) => (*a >> 8) as u8,
         VsfType::rh([_, _, _, a]) => {
             let s = ScalarF4E4::from_f32(*a);
-            (s * ScalarF4E4::from(255)).to_i32() as u8
+            (s * 255i32).to_i32() as u8
         }
         _ => 255,
     };

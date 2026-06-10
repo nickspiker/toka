@@ -106,7 +106,7 @@ No servers. No accounts. Just math.")
         let path = format!("www/capsules/{}", filename);
         std::fs::write(&path, &capsule)?;
 
-        println!("Handle: \"{}\"", handle_name);
+        println!("Handle: {}", handle_name);
         println!("Public ID: {}", public_id.to_hex());
         println!("Created {} ({} bytes)", path, capsule.len());
     }

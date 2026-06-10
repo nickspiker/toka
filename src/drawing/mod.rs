@@ -85,10 +85,45 @@ impl Canvas {
         }
     }
 
+    pub fn ru_to_px_x(&self, x: ScalarF4E4) -> usize {
+        match self {
+            Canvas::Fast(c) => c.ru_to_px_x(x).max(0) as usize,
+            Canvas::Quality(c) => c.ru_to_px_x(x).max(0) as usize,
+        }
+    }
+
+    pub fn ru_to_px_y(&self, y: ScalarF4E4) -> usize {
+        match self {
+            Canvas::Fast(c) => c.ru_to_px_y(y).max(0) as usize,
+            Canvas::Quality(c) => c.ru_to_px_y(y).max(0) as usize,
+        }
+    }
+
     pub fn set_ru(&mut self, ru: ScalarF4E4) {
         match self {
             Canvas::Fast(c) => c.set_ru(ru),
             Canvas::Quality(c) => c.set_ru(ru),
+        }
+    }
+
+    pub fn set_scroll_y(&mut self, scroll_y: ScalarF4E4) {
+        match self {
+            Canvas::Fast(c) => c.coords.set_scroll_y(scroll_y),
+            Canvas::Quality(c) => c.set_scroll_y(scroll_y),
+        }
+    }
+
+    pub fn set_clip_y(&mut self, min: usize, max: usize) {
+        match self {
+            Canvas::Fast(c) => c.coords.set_clip_y(min, max),
+            Canvas::Quality(c) => { c.set_clip_y(min, max); }
+        }
+    }
+
+    pub fn clear_clip_y(&mut self) {
+        match self {
+            Canvas::Fast(c) => c.coords.clear_clip_y(),
+            Canvas::Quality(c) => { c.clear_clip_y(); }
         }
     }
 
@@ -131,6 +166,14 @@ impl Canvas {
         match self {
             Canvas::Fast(c) => c.clear(colour),
             Canvas::Quality(c) => c.clear(colour),
+        }
+    }
+
+    /// Shift pixel buffer by delta_y rows. Exposed strip filled with bg colour.
+    pub fn scroll_pixels(&mut self, delta_y: isize, bg: u32) {
+        match self {
+            Canvas::Fast(c) => c.scroll_pixels(delta_y, bg),
+            Canvas::Quality(_c) => {} // TODO: quality pipeline scroll
         }
     }
 
@@ -312,7 +355,11 @@ impl Canvas {
     pub fn new_layer(&self) -> Canvas {
         match self {
             Canvas::Fast(c) => Canvas::Fast(CanvasFast::new_layer(c.width(), c.height(), &c.coords)),
-            Canvas::Quality(c) => Canvas::Quality(CanvasQuality::new_layer(c.width(), c.height(), c.ru())),
+            Canvas::Quality(c) => {
+                let mut layer = CanvasQuality::new_layer(c.width(), c.height(), c.ru());
+                layer.set_scroll_y(c.scroll_y());
+                Canvas::Quality(layer)
+            }
         }
     }
 
@@ -323,7 +370,7 @@ impl Canvas {
     pub fn composite_layer(&mut self, layer: &Canvas, opacity: ScalarF4E4, mode: BlendMode) {
         match (self, layer) {
             (Canvas::Fast(dst), Canvas::Fast(src)) => {
-                let a = (opacity * ScalarF4E4::from(255)).to_isize().clamp(0, 255) as u8;
+                let a = (opacity * 255i32).to_isize().clamp(0, 255) as u8;
                 dst.composite_from(src, a, mode);
             }
             (Canvas::Quality(dst), Canvas::Quality(src)) => {
@@ -337,5 +384,168 @@ impl Canvas {
     /// (no temp layer needed — render children directly).
     pub fn is_layer_passthrough(opacity: ScalarF4E4, mode: BlendMode) -> bool {
         mode.is_passthrough() && opacity >= ScalarF4E4::ONE
+    }
+
+    /// Save a rectangular pixel region (for differential rerender).
+    /// Returns (pixels, px_x, px_y, px_w, px_h) in pixel coords.
+    pub fn save_region_ru(&self, pos: CircleF4E4, size: CircleF4E4) -> (Vec<u32>, usize, usize, usize, usize) {
+        match self {
+            Canvas::Fast(c) => {
+                let half_w = size.r() >> 1usize;
+                let half_h = size.i() >> 1usize;
+                let left = c.coords.ru_to_px_x(pos.r() - half_w).max(0) as usize;
+                let top = c.coords.ru_to_px_y(pos.i() - half_h).max(0) as usize;
+                let right = (c.coords.ru_to_px_x(pos.r() + half_w).max(0) as usize).min(c.coords.width);
+                let bottom = (c.coords.ru_to_px_y(pos.i() + half_h).max(0) as usize).min(c.coords.height);
+                let w = right.saturating_sub(left);
+                let h = bottom.saturating_sub(top);
+                let mut pixels = Vec::with_capacity(w * h);
+                for row in top..bottom {
+                    let start = row * c.coords.width + left;
+                    pixels.extend_from_slice(&c.pixels[start..start + w]);
+                }
+                (pixels, left, top, w, h)
+            }
+            Canvas::Quality(_) => (Vec::new(), 0, 0, 0, 0), // TODO
+        }
+    }
+
+    /// Restore a rectangular pixel region (for differential rerender).
+    pub fn restore_region(&mut self, pixels: &[u32], px_x: usize, px_y: usize, px_w: usize, px_h: usize) {
+        match self {
+            Canvas::Fast(c) => {
+                let canvas_w = c.coords.width;
+                for row in 0..px_h {
+                    let dst_y = px_y + row;
+                    if dst_y >= c.coords.height { break; }
+                    let dst_start = dst_y * canvas_w + px_x;
+                    let src_start = row * px_w;
+                    if src_start + px_w <= pixels.len() && dst_start + px_w <= c.pixels.len() {
+                        c.pixels[dst_start..dst_start + px_w].copy_from_slice(&pixels[src_start..src_start + px_w]);
+                    }
+                }
+            }
+            Canvas::Quality(_) => {} // TODO
+        }
+    }
+
+    /// Blinkey cursor brightness constant (integer, maps to 0x01010100 * wave)
+    const BLINKEY_BRIGHTNESS: i32 = 100;
+    /// Horizontal smear half-width in pixels
+    const BLINKEY_SMEAR: i32 = 7;
+
+    /// Add blinkey wave (top-bright variant): wave = (1 - t²)(1 - t)² * BRIGHTNESS
+    /// Height spans full textbox (tip to tip). Horizontal smear attenuates with distance.
+    pub fn blinkey_add_top(&mut self, px_x: usize, px_y: usize, px_h: usize) {
+        let Canvas::Fast(c) = self else { return };
+        let w = c.coords.width;
+        let h = c.coords.height;
+        if px_h < 2 { return; }
+        let half = px_h as i32 / 2;
+        for row in 0..px_h {
+            let y = px_y + row;
+            if y >= h { break; }
+            // t in [-half, half] mapped to [-1, 1] via fixed-point (scale by 1024)
+            let t_1024 = (row as i32 - half) * 1024 / half;
+            // (1 - t²)(1 - t)² all in fixed-point /1024
+            let one_minus_t2 = 1024 - (t_1024 * t_1024 / 1024);
+            let one_minus_t = 1024 - t_1024;
+            let wave = one_minus_t2 * one_minus_t / 1024 * one_minus_t / 1024;
+            let bright = (wave * Self::BLINKEY_BRIGHTNESS / 1024).max(0) as u32;
+            if bright == 0 { continue; }
+            for dx in -Self::BLINKEY_SMEAR..=Self::BLINKEY_SMEAR {
+                let x = px_x as i32 + dx;
+                if x < 0 || x as usize >= w { continue; }
+                let idx = y * w + x as usize;
+                let atten = bright >> dx.unsigned_abs();
+                if atten > 0 {
+                    c.pixels[idx] = c.pixels[idx].saturating_add(0x01010100 * atten);
+                }
+            }
+        }
+    }
+
+    /// Add blinkey wave (bottom-bright variant): wave = (1 - t²)(1 + t)² * BRIGHTNESS
+    pub fn blinkey_add_bottom(&mut self, px_x: usize, px_y: usize, px_h: usize) {
+        let Canvas::Fast(c) = self else { return };
+        let w = c.coords.width;
+        let h = c.coords.height;
+        if px_h < 2 { return; }
+        let half = px_h as i32 / 2;
+        for row in 0..px_h {
+            let y = px_y + row;
+            if y >= h { break; }
+            let t_1024 = (row as i32 - half) * 1024 / half;
+            let one_minus_t2 = 1024 - (t_1024 * t_1024 / 1024);
+            let one_plus_t = 1024 + t_1024;
+            let wave = one_minus_t2 * one_plus_t / 1024 * one_plus_t / 1024;
+            let bright = (wave * Self::BLINKEY_BRIGHTNESS / 1024).max(0) as u32;
+            if bright == 0 { continue; }
+            for dx in -Self::BLINKEY_SMEAR..=Self::BLINKEY_SMEAR {
+                let x = px_x as i32 + dx;
+                if x < 0 || x as usize >= w { continue; }
+                let idx = y * w + x as usize;
+                let atten = bright >> dx.unsigned_abs();
+                if atten > 0 {
+                    c.pixels[idx] = c.pixels[idx].saturating_add(0x01010100 * atten);
+                }
+            }
+        }
+    }
+
+    /// Subtract blinkey wave (top-bright variant) — exact inverse of add_top
+    pub fn blinkey_sub_top(&mut self, px_x: usize, px_y: usize, px_h: usize) {
+        let Canvas::Fast(c) = self else { return };
+        let w = c.coords.width;
+        let h = c.coords.height;
+        if px_h < 2 { return; }
+        let half = px_h as i32 / 2;
+        for row in 0..px_h {
+            let y = px_y + row;
+            if y >= h { break; }
+            let t_1024 = (row as i32 - half) * 1024 / half;
+            let one_minus_t2 = 1024 - (t_1024 * t_1024 / 1024);
+            let one_minus_t = 1024 - t_1024;
+            let wave = one_minus_t2 * one_minus_t / 1024 * one_minus_t / 1024;
+            let bright = (wave * Self::BLINKEY_BRIGHTNESS / 1024).max(0) as u32;
+            if bright == 0 { continue; }
+            for dx in -Self::BLINKEY_SMEAR..=Self::BLINKEY_SMEAR {
+                let x = px_x as i32 + dx;
+                if x < 0 || x as usize >= w { continue; }
+                let idx = y * w + x as usize;
+                let atten = bright >> dx.unsigned_abs();
+                if atten > 0 {
+                    c.pixels[idx] = c.pixels[idx].saturating_sub(0x01010100 * atten);
+                }
+            }
+        }
+    }
+
+    /// Subtract blinkey wave (bottom-bright variant) — exact inverse of add_bottom
+    pub fn blinkey_sub_bottom(&mut self, px_x: usize, px_y: usize, px_h: usize) {
+        let Canvas::Fast(c) = self else { return };
+        let w = c.coords.width;
+        let h = c.coords.height;
+        if px_h < 2 { return; }
+        let half = px_h as i32 / 2;
+        for row in 0..px_h {
+            let y = px_y + row;
+            if y >= h { break; }
+            let t_1024 = (row as i32 - half) * 1024 / half;
+            let one_minus_t2 = 1024 - (t_1024 * t_1024 / 1024);
+            let one_plus_t = 1024 + t_1024;
+            let wave = one_minus_t2 * one_plus_t / 1024 * one_plus_t / 1024;
+            let bright = (wave * Self::BLINKEY_BRIGHTNESS / 1024).max(0) as u32;
+            if bright == 0 { continue; }
+            for dx in -Self::BLINKEY_SMEAR..=Self::BLINKEY_SMEAR {
+                let x = px_x as i32 + dx;
+                if x < 0 || x as usize >= w { continue; }
+                let idx = y * w + x as usize;
+                let atten = bright >> dx.unsigned_abs();
+                if atten > 0 {
+                    c.pixels[idx] = c.pixels[idx].saturating_sub(0x01010100 * atten);
+                }
+            }
+        }
     }
 }

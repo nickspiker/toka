@@ -23,11 +23,12 @@ impl CanvasFast {
         let edge_range = r_outer2 - r_inner2; // = 2r - 1
 
         let w = self.coords.width as isize;
-        let h = self.coords.height as isize;
+        let clip_min = self.coords.clip_y_min as isize;
+        let clip_max = self.coords.clip_y_max as isize;
         let src_alpha = (colour & 0xFF) as u8;
 
-        let min_y = (cy - r_outer).max(0);
-        let max_y = (cy + r_outer).min(h - 1);
+        let min_y = (cy - r_outer).max(clip_min);
+        let max_y = (cy + r_outer).min(clip_max - 1);
 
         for py in min_y..=max_y {
             let dy = py - cy;
@@ -83,11 +84,12 @@ impl CanvasFast {
         let edge_inner = r_inner_out2 - r_inner2;
 
         let w = self.coords.width as isize;
-        let h = self.coords.height as isize;
+        let clip_min = self.coords.clip_y_min as isize;
+        let clip_max = self.coords.clip_y_max as isize;
         let src_alpha = (colour & 0xFF) as u8;
 
-        let min_y = (cy - r_outer).max(0);
-        let max_y = (cy + r_outer).min(h - 1);
+        let min_y = (cy - r_outer).max(clip_min);
+        let max_y = (cy + r_outer).min(clip_max - 1);
 
         for py in min_y..=max_y {
             let dy = py - cy;
@@ -139,11 +141,12 @@ impl CanvasFast {
         let boundary = rx2 * ry2;
 
         let w = self.coords.width as isize;
-        let h = self.coords.height as isize;
+        let clip_min = self.coords.clip_y_min as isize;
+        let clip_max = self.coords.clip_y_max as isize;
         let src_alpha = (colour & 0xFF) as i64;
 
-        let min_y = (cy - ry).max(0);
-        let max_y = (cy + ry).min(h - 1);
+        let min_y = (cy - ry).max(clip_min);
+        let max_y = (cy + ry).min(clip_max - 1);
 
         for py in min_y..=max_y {
             let dy = (py - cy) as i64;
@@ -205,11 +208,12 @@ impl CanvasFast {
         let b_in = irx2 * iry2;
 
         let w = self.coords.width as isize;
-        let h = self.coords.height as isize;
+        let clip_min = self.coords.clip_y_min as isize;
+        let clip_max = self.coords.clip_y_max as isize;
         let src_alpha = (colour & 0xFF) as i64;
 
-        let min_y = (cy - ory).max(0);
-        let max_y = (cy + ory).min(h - 1);
+        let min_y = (cy - ory).max(clip_min);
+        let max_y = (cy + ory).min(clip_max - 1);
 
         for py in min_y..=max_y {
             let dy = (py - cy) as i64;

@@ -261,6 +261,34 @@ pub mod wasm {
             self.vm.scroll_y().to_f64()
         }
 
+        /// Scroll by pixel delta: shift pixel buffer, update scroll_y offset.
+        /// Sets clip to the exposed strip so subsequent rerun only draws there.
+        /// Returns the new scroll_y in RU. Positive delta = scroll down.
+        pub fn scroll_by(&mut self, delta_pixels: i32) -> f64 {
+            let span_ru = self.vm.canvas().span() * self.vm.canvas().ru();
+            let delta_ru = ScalarF4E4::from(delta_pixels) / span_ru;
+            let new_y = self.vm.scroll_y() + delta_ru;
+            self.vm.set_scroll_y(new_y);
+            let h = self.vm.canvas().height();
+            // Shift pixels — use black as background (rerun will repaint strip)
+            self.vm.canvas_mut().scroll_pixels(delta_pixels as isize, 0x000000FF);
+            // Set clip to the newly exposed strip
+            let d = (delta_pixels.unsigned_abs() as usize).min(h);
+            if delta_pixels > 0 {
+                // Scrolled down: new strip at bottom
+                self.vm.canvas_mut().set_clip_y(h - d, h);
+            } else {
+                // Scrolled up: new strip at top
+                self.vm.canvas_mut().set_clip_y(0, d);
+            }
+            new_y.to_f64()
+        }
+
+        /// Clear the Y clip — restores full-canvas drawing.
+        pub fn clear_clip(&mut self) {
+            self.vm.canvas_mut().clear_clip_y();
+        }
+
         /// Re-run the bytecode (re-execute from beginning)
         ///
         /// Use after adjusting zoom or scroll to re-render with new values.
@@ -272,6 +300,29 @@ pub mod wasm {
             // Run to completion
             self.vm.run().map_err(|e| e.to_string())?;
             Ok(!self.vm.is_halted())
+        }
+
+        /// Differential rerender — update only widget visuals without re-executing VM.
+        ///
+        /// Much faster than rerun() for keystrokes and cursor updates.
+        /// Use rerun() for button clicks that need post-table action processing.
+        pub fn rerun_widgets(&mut self) -> Result<bool, String> {
+            self.vm.rerun_widgets()
+        }
+
+        /// Check if differential rerender is available (widgets were rendered)
+        pub fn has_widget_snapshots(&self) -> bool {
+            self.vm.has_widget_snapshots()
+        }
+
+        /// Flip blinkey cursor animation — call from JS timer (~200ms interval)
+        pub fn flip_blinkey(&mut self) {
+            self.vm.flip_blinkey()
+        }
+
+        /// Resize canvas — preserves widget state (text inputs, focus)
+        pub fn resize(&mut self, width: u32, height: u32) {
+            self.vm.resize(width as usize, height as usize);
         }
 
         /// Switch rendering pipeline ("fast" or "quality")
@@ -363,21 +414,10 @@ pub mod wasm {
             self.vm.set_mouse(ScalarF4E4::from_f64(x), ScalarF4E4::from_f64(y));
         }
 
-        /// Drain triggered action URLs (returns JSON array string)
-        ///
-        /// After each interactive rerender, JS should call this and POST each URL.
-        /// Returns "[]" if no actions were triggered.
-        pub fn drain_actions(&mut self) -> String {
-            let actions = self.vm.drain_actions();
-            if actions.is_empty() {
-                "[]".to_string()
-            } else {
-                // Simple JSON array serialization
-                let escaped: Vec<String> = actions.iter().map(|url| {
-                    format!("\"{}\"", url.replace('\\', "\\\\").replace('"', "\\\""))
-                }).collect();
-                format!("[{}]", escaped.join(","))
-            }
+        /// Drain next action as raw bytes (Uint8Array in JS).
+        /// Returns empty vec when no more actions. Call in a loop until empty.
+        pub fn drain_action(&mut self) -> Vec<u8> {
+            self.vm.drain_action().unwrap_or_default()
         }
     }
 

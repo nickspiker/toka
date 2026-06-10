@@ -7,7 +7,8 @@ use spirix::{CircleF4E4, ScalarF4E4};
 impl CanvasFast {
     /// Fill an axis-aligned rectangle with sub-pixel AA on all edges (RU coordinates, center-origin)
     pub fn fill_rect_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, colour: u32) {
-        let center = self.coords.half_dims + pos * self.coords.span * self.coords.ru;
+        let scrolled = CircleF4E4::from((pos.r(), pos.i() - self.coords.scroll_y));
+        let center = self.coords.half_dims + scrolled * self.coords.span * self.coords.ru;
         let half: CircleF4E4 = (size * self.coords.span * self.coords.ru) >> 1;
 
         let hw = half.r();
@@ -18,8 +19,8 @@ impl CanvasFast {
 
         let x0 = (cx - hw).to_isize().clamp(0, self.coords.width as isize);
         let x1 = (cx + hw).to_isize().clamp(0, self.coords.width as isize);
-        let y0 = (cy - hh).to_isize().clamp(0, self.coords.height as isize);
-        let y1 = (cy + hh).to_isize().clamp(0, self.coords.height as isize);
+        let y0 = (cy - hh).to_isize().clamp(self.coords.clip_y_min as isize, self.coords.clip_y_max as isize);
+        let y1 = (cy + hh).to_isize().clamp(self.coords.clip_y_min as isize, self.coords.clip_y_max as isize);
 
         let base_alpha = colour as u8;
         let width = self.coords.width;
@@ -60,8 +61,8 @@ impl CanvasFast {
         let span_ru = self.coords.span * self.coords.ru;
         let half_w = self.coords.half_dims.r();
         let half_h = self.coords.half_dims.i();
-        let py = (half_h + y * span_ru).to_isize();
-        if py < 0 || py >= self.coords.height as isize { return; }
+        let py = (half_h + (y - self.coords.scroll_y) * span_ru).to_isize();
+        if py < self.coords.clip_y_min as isize || py >= self.coords.clip_y_max as isize { return; }
         let px0 = (half_w + x0 * span_ru).to_isize().clamp(0, self.coords.width as isize) as usize;
         let px1 = (half_w + x1 * span_ru).to_isize().clamp(0, self.coords.width as isize) as usize;
         let row = py as usize * self.coords.width;
@@ -82,8 +83,8 @@ impl CanvasFast {
         let half_h = self.coords.half_dims.i();
         let px = (half_w + x * span_ru).to_isize();
         if px < 0 || px >= self.coords.width as isize { return; }
-        let py0 = (half_h + y0 * span_ru).to_isize().clamp(0, self.coords.height as isize) as usize;
-        let py1 = (half_h + y1 * span_ru).to_isize().clamp(0, self.coords.height as isize) as usize;
+        let py0 = (half_h + (y0 - self.coords.scroll_y) * span_ru).to_isize().clamp(self.coords.clip_y_min as isize, self.coords.clip_y_max as isize) as usize;
+        let py1 = (half_h + (y1 - self.coords.scroll_y) * span_ru).to_isize().clamp(self.coords.clip_y_min as isize, self.coords.clip_y_max as isize) as usize;
         let px = px as usize;
         let w = self.coords.width;
         let alpha = colour as u8;
@@ -121,7 +122,8 @@ impl CanvasFast {
         angle: ScalarF4E4,
         colour: u32,
     ) {
-        let center = self.coords.half_dims + pos * self.coords.span * self.coords.ru;
+        let scrolled = CircleF4E4::from((pos.r(), pos.i() - self.coords.scroll_y));
+        let center = self.coords.half_dims + scrolled * self.coords.span * self.coords.ru;
         let half: CircleF4E4 = (size * self.coords.span * self.coords.ru) >> 1;
 
         let cos = angle.cos();
@@ -145,10 +147,10 @@ impl CanvasFast {
             .clamp(0, self.coords.width as isize);
         let y0 = (cy - aabb_half_h)
             .to_isize()
-            .clamp(0, self.coords.height as isize);
+            .clamp(self.coords.clip_y_min as isize, self.coords.clip_y_max as isize);
         let y1 = (cy + aabb_half_h)
             .to_isize()
-            .clamp(0, self.coords.height as isize);
+            .clamp(self.coords.clip_y_min as isize, self.coords.clip_y_max as isize);
 
         let base_alpha = colour as u8;
         let width = self.coords.width;

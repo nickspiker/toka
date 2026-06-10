@@ -76,8 +76,33 @@ impl CanvasFast {
     /// Clear canvas to a VSF colour (pre-converts to sRGB u32)
     pub fn clear(&mut self, colour: &vsf::VsfType) -> Result<(), String> {
         let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-        self.pixels.fill(u32_colour);
+        let w = self.coords.width;
+        let y0 = self.coords.clip_y_min;
+        let y1 = self.coords.clip_y_max;
+        self.pixels[y0 * w .. y1 * w].fill(u32_colour);
         Ok(())
+    }
+
+    /// Shift pixel buffer up or down by `delta_y` rows. Exposed strip filled with `bg`.
+    /// Positive delta = content moves up (scroll down). Negative = content moves down.
+    /// copy_within uses memmove internally — safe for overlapping regions.
+    pub fn scroll_pixels(&mut self, delta_y: isize, bg: u32) {
+        let h = self.coords.height;
+        let w = self.coords.width;
+        let d = delta_y.unsigned_abs().min(h);
+        if d == 0 { return; }
+        if d >= h { self.pixels.fill(bg); return; }
+
+        if delta_y > 0 {
+            // Scroll down: copy rows [d..h] → [0..h-d], fill bottom strip
+            self.pixels.copy_within(d * w .. h * w, 0);
+            self.pixels[((h - d) * w)..].fill(bg);
+        } else {
+            // Scroll up: copy rows [0..h-d] → [d..h], fill top strip
+            self.pixels.copy_within(0 .. (h - d) * w, d * w);
+            self.pixels[..d * w].fill(bg);
+        }
+
     }
 
     /// Pixel buffer as RGBA bytes for browser ImageData
@@ -215,6 +240,7 @@ impl CanvasFast {
             pixels: vec![0u32; width * height], // fully transparent
         };
         layer.coords.set_ru(coords.ru());
+        layer.coords.set_scroll_y(coords.scroll_y);
         layer
     }
 

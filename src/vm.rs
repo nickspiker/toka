@@ -173,6 +173,40 @@ pub enum InputEvent {
     },
 }
 
+/// Cached rendering parameters for a widget — used for differential rerender
+/// Stores everything needed to redraw a widget without re-executing the VM
+#[derive(Clone)]
+struct WidgetSnapshot {
+    widget_id: u32,
+    kind: WidgetSnapshotKind,
+    /// Position in RU (center of widget)
+    pos: CircleF4E4,
+    /// Size in RU
+    size: CircleF4E4,
+    /// Font BLAKE3 hash key
+    font_key: [u8; 32],
+    /// Font bytes (shared across widgets from same font)
+    font_bytes: Vec<u8>,
+    /// Widget colour (VsfType)
+    colour: VsfType,
+    /// Text size in global RU (not derived from cell dimensions)
+    text_size: ScalarF4E4,
+    /// Background pixels behind this widget — saved before drawing content
+    /// Format: RGBA u32 pixels, row-major, covering the widget's bounding rect
+    bg_pixels: Vec<u32>,
+    /// Pixel bounds (cached from RU conversion)
+    px_x: usize,
+    px_y: usize,
+    px_w: usize,
+    px_h: usize,
+}
+
+#[derive(Clone)]
+enum WidgetSnapshotKind {
+    TextInput { placeholder: String },
+    Button { label: String, action_url: Option<String> },
+}
+
 /// Persistent state for a text input widget (survives across frames)
 #[derive(Debug, Clone)]
 pub struct TextInputState {
@@ -184,6 +218,16 @@ pub struct TextInputState {
     pub selection_anchor: Option<usize>,
     /// Horizontal scroll offset in RU
     pub scroll_offset: ScalarF4E4,
+    /// Blinkey cursor visible (add has been applied)
+    pub blinkey_visible: bool,
+    /// Which half is bright (true=top, false=bottom)
+    pub blinkey_wave_top: bool,
+    /// Cached cursor pixel x position
+    pub blinkey_px_x: usize,
+    /// Cached cursor pixel y (top of textbox)
+    pub blinkey_px_y: usize,
+    /// Cached cursor height in pixels
+    pub blinkey_px_h: usize,
 }
 
 impl TextInputState {
@@ -193,6 +237,11 @@ impl TextInputState {
             cursor_pos: 0,
             selection_anchor: None,
             scroll_offset: ScalarF4E4::ZERO,
+            blinkey_visible: false,
+            blinkey_wave_top: false,
+            blinkey_px_x: 0,
+            blinkey_px_y: 0,
+            blinkey_px_h: 0,
         }
     }
 
@@ -252,7 +301,6 @@ pub struct VM {
     time: ScalarF4E4,
 
     // ── Interactive widget state (persists across reset) ──
-
     /// Input event queue from host — consumed during execution, cleared after
     events: Vec<InputEvent>,
 
@@ -270,6 +318,9 @@ pub struct VM {
 
     /// Action URLs triggered by button clicks this frame
     actions: Vec<String>,
+
+    /// Cached widget snapshots from last full render — used for differential rerender
+    widget_snapshots: Vec<WidgetSnapshot>,
 }
 
 /// Cell content types for table rendering (text, buttons, text inputs, sub-tables)
@@ -342,12 +393,24 @@ impl VM {
             focused_widget: None,
             mouse_down: false,
             actions: Vec::new(),
+            widget_snapshots: Vec::new(),
         }
     }
 
     /// Replace bytecode (for rerun with new code)
     pub fn set_bytecode(&mut self, bytecode: Vec<u8>) {
         self.bytecode = bytecode;
+    }
+
+    /// Resize canvas — recreates pixel buffer at new dimensions, preserves widget state
+    pub fn resize(&mut self, width: usize, height: usize) {
+        let pipeline = self.canvas.pipeline_name();
+        self.canvas = if pipeline == "quality" {
+            Canvas::new_quality(width, height)
+        } else {
+            Canvas::new_fast(width, height)
+        };
+        // font_cache, text_inputs, focused_widget, events all preserved
     }
 
     /// Reset VM state to re-execute bytecode from the beginning
@@ -361,7 +424,18 @@ impl VM {
         self.stack.clear();
         self.hit_regions.clear(); // Rebuilt each frame
         self.actions.clear(); // Rebuilt each frame
-        // events, text_inputs, focused_widget, mouse_down persist
+        self.widget_snapshots.clear(); // Rebuilt on full render
+        // If there's a mousedown event, clear focus — opcodes will re-establish if click is inside a widget
+        if self.events.iter().any(|e| matches!(e, InputEvent::MouseDown { .. })) {
+            self.focused_widget = None;
+        }
+        // text_inputs, mouse_down persist
+        // Reset blinkey visual state — canvas is repainted on rerun
+        for state in self.text_inputs.values_mut() {
+            state.blinkey_visible = false;
+        }
+        // Sync scroll offset to canvas coordinate system
+        self.canvas.set_scroll_y(self.scroll_y);
     }
 
     /// Register a function by its BLAKE3 hash
@@ -782,7 +856,7 @@ impl VM {
                 // Parse optional modifier tags from top of stack
                 loop {
                     match &next {
-                        VsfType::l(tag) => match tag.as_str() {
+                        VsfType::a(tag) => match tag.as_str() {
                             "l" => {
                                 settings.align = 1;
                                 next = self.pop()?;
@@ -864,7 +938,7 @@ impl VM {
                 let colour = next;
 
                 let text = match self.pop()? {
-                    VsfType::x(s) | VsfType::l(s) => s,
+                    VsfType::x(s) | VsfType::a(s) => s,
                     other => {
                         return Err(format!(
                             "draw_text: expected string for text, got {:?}",
@@ -923,7 +997,7 @@ impl VM {
                 // Parse optional modifier tags from top of stack
                 loop {
                     match &next {
-                        VsfType::l(tag) => match tag.as_str() {
+                        VsfType::a(tag) => match tag.as_str() {
                             "w" => {
                                 match self.pop()? {
                                     VsfType::s44(w) => settings.weight = Some(w),
@@ -1032,7 +1106,7 @@ impl VM {
 
                 loop {
                     match &next {
-                        VsfType::l(tag) => match tag.as_str() {
+                        VsfType::a(tag) => match tag.as_str() {
                             "c" => {
                                 cols = match self.pop()? {
                                     VsfType::u(n, _) => n,
@@ -1074,21 +1148,21 @@ impl VM {
                                 cells = Vec::with_capacity(count);
                                 for _ in 0..count {
                                     let cell = match self.pop()? {
-                                        VsfType::x(s) | VsfType::l(s) => CellContent::Text(s),
+                                        VsfType::x(s) | VsfType::a(s) => CellContent::Text(s),
                                         colour @ VsfType::ra(_) => {
                                             // Styled text: colour on top, then optional s44 size, then text
                                             let next = self.pop()?;
                                             let (size_override, text) = match next {
                                                 VsfType::s44(s) => {
                                                     let t = match self.pop()? {
-                                                        VsfType::x(s) | VsfType::l(s) => s,
+                                                        VsfType::x(s) | VsfType::a(s) => s,
                                                         other => return Err(format!(
                                                             "draw_table: styled cell expected string after size, got {:?}", other
                                                         )),
                                                     };
                                                     (Some(s), t)
                                                 }
-                                                VsfType::x(s) | VsfType::l(s) => (None, s),
+                                                VsfType::x(s) | VsfType::a(s) => (None, s),
                                                 other => return Err(format!(
                                                     "draw_table: styled cell expected string or s44, got {:?}", other
                                                 )),
@@ -1099,7 +1173,7 @@ impl VM {
                                             // Button cell: drawable carries label + colour
                                             // Pop action_url, then id from stack
                                             let action_url = match self.pop()? {
-                                                VsfType::x(s) | VsfType::l(s) => {
+                                                VsfType::x(s) | VsfType::a(s) => {
                                                     if s.is_empty() { None } else { Some(s) }
                                                 }
                                                 other => return Err(format!(
@@ -1136,24 +1210,73 @@ impl VM {
                                             // First cell_count children are cell data (1 entry per cell)
                                             while ci < children.len() && sub_cells.len() < cell_count {
                                                 match &children[ci] {
-                                                    VsfType::x(s) | VsfType::l(s) => {
-                                                        sub_cells.push(CellContent::Text(s.clone()));
+                                                    VsfType::x(s) | VsfType::a(s) => {
+                                                        // Could be plain text, or text followed by optional s44 + ra (styled)
+                                                        // Peek ahead: if next child is s44 or ra, it's styled
+                                                        let mut size_override = None;
+                                                        let mut colour_override = None;
+                                                        let mut peek = ci + 1;
+                                                        if peek < children.len() {
+                                                            if let VsfType::s44(sz) = &children[peek] {
+                                                                size_override = Some(*sz);
+                                                                peek += 1;
+                                                            }
+                                                        }
+                                                        if peek < children.len() {
+                                                            if let VsfType::ra(_) = &children[peek] {
+                                                                colour_override = Some(children[peek].clone());
+                                                                ci = peek; // advance past colour
+                                                            }
+                                                        }
+                                                        if colour_override.is_some() {
+                                                            // Advance past size too (ci already at colour)
+                                                            sub_cells.push(CellContent::Styled(s.clone(), colour_override.unwrap(), size_override));
+                                                        } else {
+                                                            sub_cells.push(CellContent::Text(s.clone()));
+                                                        }
                                                     }
                                                     VsfType::rou(_, _, label, _variant, colour) => {
-                                                        // Display-only button (no id/action in sub-tables)
+                                                        // Button: next children are id (u5) and action_url (l)
+                                                        let id = if ci + 1 < children.len() {
+                                                            ci += 1;
+                                                            match &children[ci] {
+                                                                VsfType::u5(n) => *n,
+                                                                VsfType::u3(n) => *n as u32,
+                                                                VsfType::u(n, _) => *n as u32,
+                                                                _ => 0,
+                                                            }
+                                                        } else { 0 };
+                                                        let action_url = if ci + 1 < children.len() {
+                                                            ci += 1;
+                                                            match &children[ci] {
+                                                                VsfType::x(s) | VsfType::a(s) => {
+                                                                    if s.is_empty() { None } else { Some(s.clone()) }
+                                                                }
+                                                                _ => None,
+                                                            }
+                                                        } else { None };
                                                         sub_cells.push(CellContent::Button {
                                                             label: label.clone(),
                                                             colour: *colour.clone(),
-                                                            id: 0,
-                                                            action_url: None,
+                                                            id,
+                                                            action_url,
                                                         });
                                                     }
                                                     VsfType::roq(_, _, placeholder, colour) => {
-                                                        // Display-only text input (no id in sub-tables)
+                                                        // TextInput: next child is id (u5)
+                                                        let id = if ci + 1 < children.len() {
+                                                            ci += 1;
+                                                            match &children[ci] {
+                                                                VsfType::u5(n) => *n,
+                                                                VsfType::u3(n) => *n as u32,
+                                                                VsfType::u(n, _) => *n as u32,
+                                                                _ => 0,
+                                                            }
+                                                        } else { 0 };
                                                         sub_cells.push(CellContent::TextInput {
                                                             placeholder: placeholder.clone(),
                                                             colour: *colour.clone(),
-                                                            id: 0,
+                                                            id,
                                                         });
                                                     }
                                                     VsfType::roa(..) => {
@@ -1168,7 +1291,7 @@ impl VM {
                                             }
                                             // Remaining children are settings tags
                                             while ci < children.len() {
-                                                if let VsfType::l(tag) = &children[ci] {
+                                                if let VsfType::a(tag) = &children[ci] {
                                                     ci += 1;
                                                     match tag.as_str() {
                                                         "x" => {
@@ -1185,7 +1308,7 @@ impl VM {
                                                         }
                                                         "j" => {
                                                             if ci < children.len() {
-                                                                if let VsfType::x(s) | VsfType::l(s) = &children[ci] {
+                                                                if let VsfType::x(s) | VsfType::a(s) = &children[ci] {
                                                                     sub_settings.h_align = Some(s.bytes().collect());
                                                                     ci += 1;
                                                                 }
@@ -1268,7 +1391,9 @@ impl VM {
                             }
                             "x" => {
                                 if cols == 0 {
-                                    return Err("draw_table: 'x' tag requires 'c' tag first".to_string());
+                                    return Err(
+                                        "draw_table: 'x' tag requires 'c' tag first".to_string()
+                                    );
                                 }
                                 let mut widths = Vec::with_capacity(cols);
                                 for _ in 0..cols {
@@ -1364,7 +1489,9 @@ impl VM {
                             }
                             "j" => {
                                 match self.pop()? {
-                                    VsfType::x(s) | VsfType::l(s) => settings.h_align = Some(s.into_bytes()),
+                                    VsfType::x(s) | VsfType::a(s) => {
+                                        settings.h_align = Some(s.into_bytes())
+                                    }
                                     other => {
                                         return Err(format!(
                                             "draw_table: 'j' tag expected string, got {:?}",
@@ -1376,7 +1503,9 @@ impl VM {
                             }
                             "v" => {
                                 match self.pop()? {
-                                    VsfType::x(s) | VsfType::l(s) => settings.v_align = Some(s.into_bytes()),
+                                    VsfType::x(s) | VsfType::a(s) => {
+                                        settings.v_align = Some(s.into_bytes())
+                                    }
                                     other => {
                                         return Err(format!(
                                             "draw_table: 'v' tag expected string, got {:?}",
@@ -1463,9 +1592,18 @@ impl VM {
                 let font_key = *blake3::hash(&font_bytes).as_bytes();
 
                 let result = self.render_table(
-                    &cells, cols, rows, &settings, pos,
-                    font_key, &font_bytes, size, &text_colour,
-                    &query_cells, 0, false,
+                    &cells,
+                    cols,
+                    rows,
+                    &settings,
+                    pos,
+                    font_key,
+                    &font_bytes,
+                    size,
+                    &text_colour,
+                    &query_cells,
+                    0,
+                    false,
                 )?;
 
                 // Push widget results onto stack (in order of encounter)
@@ -1475,16 +1613,15 @@ impl VM {
 
                 // Push geometry for queried cells (reverse order → first cell on top)
                 for &(row, col) in query_cells.iter().rev() {
-                    if row >= rows || col >= cols { continue; }
+                    if row >= rows || col >= cols {
+                        continue;
+                    }
                     let rh = result.row_heights[row];
                     let cell_center = CircleF4E4::from((
                         result.col_lefts[col] + (result.col_widths[col] >> 1usize),
                         result.row_tops[row] + (rh >> 1usize),
                     ));
-                    let cell_size = CircleF4E4::from((
-                        result.col_widths[col],
-                        rh,
-                    ));
+                    let cell_size = CircleF4E4::from((result.col_widths[col], rh));
                     self.stack.push(VsfType::v(b'b', font_bytes.clone()));
                     self.stack.push(VsfType::c44(cell_center));
                     self.stack.push(VsfType::c44(cell_size));
@@ -1549,7 +1686,8 @@ impl VM {
 
             Opcode::aspect_ratio => {
                 // Push width / height (dimensionless)
-                let ar = ScalarF4E4::from(self.canvas.width()) / ScalarF4E4::from(self.canvas.height());
+                let ar =
+                    ScalarF4E4::from(self.canvas.width()) / self.canvas.height();
                 self.stack.push(VsfType::s44(ar));
             }
 
@@ -1565,8 +1703,13 @@ impl VM {
                 };
                 let colour = self.pop()?;
                 let label = match self.pop()? {
-                    VsfType::x(s) | VsfType::l(s) => s,
-                    other => return Err(format!("button: expected string for label, got {:?}", other)),
+                    VsfType::x(s) | VsfType::a(s) => s,
+                    other => {
+                        return Err(format!(
+                            "button: expected string for label, got {:?}",
+                            other
+                        ))
+                    }
                 };
                 let size = match self.pop()? {
                     VsfType::c44(c) => c,
@@ -1578,7 +1721,12 @@ impl VM {
                 };
                 let font_bytes = match self.pop()? {
                     VsfType::v(b'b', bytes) => bytes,
-                    other => return Err(format!("button: expected binary blob for font, got {:?}", other)),
+                    other => {
+                        return Err(format!(
+                            "button: expected binary blob for font, got {:?}",
+                            other
+                        ))
+                    }
                 };
 
                 // Register hit region (pos is center, convert to top-left)
@@ -1602,7 +1750,7 @@ impl VM {
 
                 // Draw centered label text
                 let font_key = *blake3::hash(&font_bytes).as_bytes();
-                let text_size = size.i() * ScalarF4E4::from(2) / ScalarF4E4::from(3); // 2/3 of button height
+                let text_size = size.i() * 2 / 3; // 2/3 of button height
                 let text_settings = crate::drawing::TextSettings {
                     align: 0, // center
                     ..Default::default()
@@ -1618,16 +1766,21 @@ impl VM {
                     &text_settings,
                 )?;
 
-                // Check if clicked this frame
+                // Check if clicked this frame (mouse Y is screen-space, bounds are content-space)
                 let mut clicked = false;
                 for event in &self.events {
                     if let InputEvent::MouseDown { x, y } = event {
-                        if *x >= left && *x <= right && *y >= top && *y <= bottom {
+                        let yc = *y + self.scroll_y;
+                        if *x >= left && *x <= right && yc >= top && yc <= bottom {
                             clicked = true;
                         }
                     }
                 }
-                self.stack.push(VsfType::s44(if clicked { ScalarF4E4::ONE } else { ScalarF4E4::ZERO }));
+                self.stack.push(VsfType::s44(if clicked {
+                    ScalarF4E4::ONE
+                } else {
+                    ScalarF4E4::ZERO
+                }));
             }
 
             Opcode::text_input => {
@@ -1642,20 +1795,37 @@ impl VM {
                 };
                 let colour = self.pop()?;
                 let placeholder = match self.pop()? {
-                    VsfType::x(s) | VsfType::l(s) => s,
-                    other => return Err(format!("text_input: expected string for placeholder, got {:?}", other)),
+                    VsfType::x(s) | VsfType::a(s) => s,
+                    other => {
+                        return Err(format!(
+                            "text_input: expected string for placeholder, got {:?}",
+                            other
+                        ))
+                    }
                 };
                 let size = match self.pop()? {
                     VsfType::c44(c) => c,
-                    other => return Err(format!("text_input: expected c44 for size, got {:?}", other)),
+                    other => {
+                        return Err(format!(
+                            "text_input: expected c44 for size, got {:?}",
+                            other
+                        ))
+                    }
                 };
                 let pos = match self.pop()? {
                     VsfType::c44(c) => c,
-                    other => return Err(format!("text_input: expected c44 for pos, got {:?}", other)),
+                    other => {
+                        return Err(format!("text_input: expected c44 for pos, got {:?}", other))
+                    }
                 };
                 let font_bytes = match self.pop()? {
                     VsfType::v(b'b', bytes) => bytes,
-                    other => return Err(format!("text_input: expected binary blob for font, got {:?}", other)),
+                    other => {
+                        return Err(format!(
+                            "text_input: expected binary blob for font, got {:?}",
+                            other
+                        ))
+                    }
                 };
 
                 // Ensure widget state exists
@@ -1703,67 +1873,66 @@ impl VM {
                                     state.cursor_pos += 1;
                                 }
                             }
-                            InputEvent::KeyDown { key } => {
-                                match key.as_str() {
-                                    "Backspace" => {
-                                        if let Some(anchor) = state.selection_anchor.take() {
-                                            let (start, end) = if anchor < state.cursor_pos {
-                                                (anchor, state.cursor_pos)
-                                            } else {
-                                                (state.cursor_pos, anchor)
-                                            };
-                                            state.chars.drain(start..end);
-                                            state.cursor_pos = start;
-                                        } else if state.cursor_pos > 0 {
-                                            state.cursor_pos -= 1;
-                                            state.chars.remove(state.cursor_pos);
-                                        }
+                            InputEvent::KeyDown { key } => match key.as_str() {
+                                "Backspace" => {
+                                    if let Some(anchor) = state.selection_anchor.take() {
+                                        let (start, end) = if anchor < state.cursor_pos {
+                                            (anchor, state.cursor_pos)
+                                        } else {
+                                            (state.cursor_pos, anchor)
+                                        };
+                                        state.chars.drain(start..end);
+                                        state.cursor_pos = start;
+                                    } else if state.cursor_pos > 0 {
+                                        state.cursor_pos -= 1;
+                                        state.chars.remove(state.cursor_pos);
                                     }
-                                    "Delete" => {
-                                        if let Some(anchor) = state.selection_anchor.take() {
-                                            let (start, end) = if anchor < state.cursor_pos {
-                                                (anchor, state.cursor_pos)
-                                            } else {
-                                                (state.cursor_pos, anchor)
-                                            };
-                                            state.chars.drain(start..end);
-                                            state.cursor_pos = start;
-                                        } else if state.cursor_pos < state.chars.len() {
-                                            state.chars.remove(state.cursor_pos);
-                                        }
-                                    }
-                                    "ArrowLeft" => {
-                                        if state.cursor_pos > 0 {
-                                            state.cursor_pos -= 1;
-                                        }
-                                        state.selection_anchor = None;
-                                    }
-                                    "ArrowRight" => {
-                                        if state.cursor_pos < state.chars.len() {
-                                            state.cursor_pos += 1;
-                                        }
-                                        state.selection_anchor = None;
-                                    }
-                                    "Home" => {
-                                        state.cursor_pos = 0;
-                                        state.selection_anchor = None;
-                                    }
-                                    "End" => {
-                                        state.cursor_pos = state.chars.len();
-                                        state.selection_anchor = None;
-                                    }
-                                    _ => {}
                                 }
-                            }
+                                "Delete" => {
+                                    if let Some(anchor) = state.selection_anchor.take() {
+                                        let (start, end) = if anchor < state.cursor_pos {
+                                            (anchor, state.cursor_pos)
+                                        } else {
+                                            (state.cursor_pos, anchor)
+                                        };
+                                        state.chars.drain(start..end);
+                                        state.cursor_pos = start;
+                                    } else if state.cursor_pos < state.chars.len() {
+                                        state.chars.remove(state.cursor_pos);
+                                    }
+                                }
+                                "ArrowLeft" => {
+                                    if state.cursor_pos > 0 {
+                                        state.cursor_pos -= 1;
+                                    }
+                                    state.selection_anchor = None;
+                                }
+                                "ArrowRight" => {
+                                    if state.cursor_pos < state.chars.len() {
+                                        state.cursor_pos += 1;
+                                    }
+                                    state.selection_anchor = None;
+                                }
+                                "Home" => {
+                                    state.cursor_pos = 0;
+                                    state.selection_anchor = None;
+                                }
+                                "End" => {
+                                    state.cursor_pos = state.chars.len();
+                                    state.selection_anchor = None;
+                                }
+                                _ => {}
+                            },
                             _ => {}
                         }
                     }
                 }
 
-                // Handle click-to-focus and click-to-position
+                // Handle click-to-focus and click-to-position (screen-space Y → content-space)
                 for event in &self.events {
                     if let InputEvent::MouseDown { x, y } = event {
-                        if *x >= left && *x <= right && *y >= top && *y <= bottom {
+                        let yc = *y + self.scroll_y;
+                        if *x >= left && *x <= right && yc >= top && yc <= bottom {
                             self.focused_widget = Some(widget_id);
                             // TODO: compute cursor position from click x using font metrics
                             let state = self.text_inputs.get_mut(&widget_id).unwrap();
@@ -1772,68 +1941,39 @@ impl VM {
                     }
                 }
 
-                // Draw 1px hairline border (no AA — axis-aligned fast path)
-                self.canvas.stroke_rect_ru(pos, size, &colour)?;
-
-                // Draw text content (or placeholder if empty)
-                let state = self.text_inputs.get(&widget_id).unwrap();
-                let display_text = if state.chars.is_empty() {
-                    placeholder.clone()
-                } else {
-                    state.text()
-                };
+                // Snapshot background before drawing widget
                 let font_key = *blake3::hash(&font_bytes).as_bytes();
-                let text_size = size.i() * ScalarF4E4::from(2) / ScalarF4E4::from(3);
-                let padding = size.r() / ScalarF4E4::from(40); // small left padding
-                let text_pos = CircleF4E4::from((left + padding, pos.i()));
-
-                // Use dimmer colour for placeholder
-                let text_colour = if state.chars.is_empty() {
-                    // Dim the colour — halve RGB channels
-                    // For simplicity, use the colour as-is but with alpha hint
-                    VsfType::ra([128, 128, 128, 255])
-                } else {
-                    colour.clone()
-                };
-
-                let text_settings = crate::drawing::TextSettings {
-                    align: 1, // left-align
-                    ..Default::default()
-                };
-                self.canvas.draw_text(
-                    &mut self.font_cache,
+                let standalone_text_size = size.i() * 2 / 3;
+                let (bg_pixels, px_x, px_y, px_w, px_h) = self.canvas.save_region_ru(pos, size);
+                self.widget_snapshots.push(WidgetSnapshot {
+                    widget_id,
+                    kind: WidgetSnapshotKind::TextInput { placeholder: placeholder.clone() },
+                    pos, size,
                     font_key,
-                    &font_bytes,
-                    text_pos,
-                    text_size,
-                    &display_text,
-                    &text_colour,
-                    &text_settings,
+                    font_bytes: font_bytes.clone(),
+                    colour: colour.clone(),
+                    text_size: standalone_text_size,
+                    bg_pixels, px_x, px_y, px_w, px_h,
+                });
+
+                // Draw widget content
+                let cursor_info = Self::draw_text_input_visual(
+                    &mut self.canvas, &mut self.font_cache,
+                    pos, size, &colour, &placeholder,
+                    font_key, &font_bytes,
+                    self.text_inputs.get(&widget_id).unwrap(),
+                    is_focused,
+                    standalone_text_size,
                 )?;
-
-                // Draw cursor if focused
-                if is_focused {
-                    let state = self.text_inputs.get(&widget_id).unwrap();
-                    // Measure text width up to cursor position
-                    let cursor_text: String = state.chars[..state.cursor_pos].iter().collect();
-                    let font = self.font_cache.get(&font_key);
-                    if let Some(font) = font {
-                        use fontdue::{Font as FontdueFont, layout::*};
-                        let span_ru = self.canvas.span() * self.canvas.ru();
-                        let px = text_size * span_ru;
-                        let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-                        layout.reset(&LayoutSettings::default());
-                        layout.append(&[font as &FontdueFont], &TextStyle::new(&cursor_text, px, 0));
-                        let cursor_width_px = layout.glyphs().iter()
-                            .map(|g| g.x + ScalarF4E4::from(g.width as i32))
-                            .fold(ScalarF4E4::ZERO, |a, b| if b > a { b } else { a });
-                        let cursor_x = left + padding + cursor_width_px / span_ru;
-
-                        // Draw cursor line (1px vertical, no AA)
-                        let cursor_y0 = top + (size.i() / ScalarF4E4::from(6));
-                        let cursor_y1 = bottom - (size.i() / ScalarF4E4::from(6));
-                        self.canvas.vline_ru(cursor_x, cursor_y0, cursor_y1, &colour)?;
-                    }
+                // Start blinkey cursor if focused
+                if let Some((cx, cy, ch)) = cursor_info {
+                    let state = self.text_inputs.get_mut(&widget_id).unwrap();
+                    state.blinkey_px_x = cx;
+                    state.blinkey_px_y = cy;
+                    state.blinkey_px_h = ch;
+                    state.blinkey_wave_top = true;
+                    self.canvas.blinkey_add_top(cx, cy, ch);
+                    state.blinkey_visible = true;
                 }
 
                 // Push current text content
@@ -1845,8 +1985,10 @@ impl VM {
                 // Pop URL (string), pop condition (s44/u)
                 // If condition is non-zero, queue the URL for JS to execute as POST
                 let url = match self.pop()? {
-                    VsfType::x(s) | VsfType::l(s) => s,
-                    other => return Err(format!("action: expected string for URL, got {:?}", other)),
+                    VsfType::x(s) | VsfType::a(s) => s,
+                    other => {
+                        return Err(format!("action: expected string for URL, got {:?}", other))
+                    }
                 };
                 let condition = self.pop()?;
                 let is_truthy = match &condition {
@@ -1860,13 +2002,31 @@ impl VM {
                 }
             }
 
+            Opcode::string_concat => {
+                // Pop b, pop a; push a+b as string
+                let b = self.pop()?;
+                let a = self.pop()?;
+                let sa = match &a {
+                    VsfType::x(s) | VsfType::a(s) => s.as_str(),
+                    _ => return Err(format!("string_concat: expected string for a, got {:?}", type_name(&a))),
+                };
+                let sb = match &b {
+                    VsfType::x(s) | VsfType::a(s) => s.as_str(),
+                    _ => return Err(format!("string_concat: expected string for b, got {:?}", type_name(&b))),
+                };
+                let mut result = String::with_capacity(sa.len() + sb.len());
+                result.push_str(sa);
+                result.push_str(sb);
+                self.stack.push(VsfType::x(result));
+            }
+
             Opcode::guard => {
                 // Pop condition; halt if zero
                 let cond = self.pop()?;
                 let is_zero = match &cond {
                     VsfType::s44(s) => *s == ScalarF4E4::ZERO,
                     VsfType::u(n, _) => *n == 0,
-                    VsfType::l(s) => s.is_empty(),
+                    VsfType::a(s) => s.is_empty(),
                     _ => false,
                 };
                 if is_zero {
@@ -2048,20 +2208,27 @@ impl VM {
                         CellContent::SubTable { .. } => "",
                     };
                     let font = self.font_cache.get(&font_key).unwrap();
-                    layout.reset(&LayoutSettings::default());
-                    layout.append(&[font as &FontdueFont], &TextStyle::new(measure_text, px, 0));
-                    let glyphs = layout.glyphs();
-                    if !glyphs.is_empty() {
-                        let last = &glyphs[glyphs.len() - 1];
-                        let text_w = last.x - glyphs[0].x + last.width;
-                        if text_w > max_widths[col] { max_widths[col] = text_w; }
+                    // Measure each line independently to handle \n correctly
+                    for line in measure_text.split('\n') {
+                        layout.reset(&LayoutSettings::default());
+                        layout.append(&[font as &FontdueFont], &TextStyle::new(line, px, 0));
+                        let glyphs = layout.glyphs();
+                        if !glyphs.is_empty() {
+                            let last = &glyphs[glyphs.len() - 1];
+                            let text_w = last.x - glyphs[0].x + last.width;
+                            if text_w > max_widths[col] {
+                                max_widths[col] = text_w;
+                            }
+                        }
                     }
                 }
             }
             let pad2 = settings.padding << 1usize;
             max_widths.iter().map(|w| *w / span_ru + pad2).collect()
         };
-        let table_width: ScalarF4E4 = col_widths.iter().copied()
+        let table_width: ScalarF4E4 = col_widths
+            .iter()
+            .copied()
             .fold(ScalarF4E4::ZERO, |a, b| a + b);
         let table_left = pos.r() - (table_width >> 1usize);
 
@@ -2079,16 +2246,20 @@ impl VM {
         };
         let canvas_h_px = ScalarF4E4::from(self.canvas.height());
         let mut cell_text_heights = vec![single_line_text_h; rows * cols];
+        let have_widths = settings.col_widths.is_some()
+            || col_widths.iter().any(|w| w.is_positive());
         let row_heights: Vec<ScalarF4E4> = if let Some(rh) = settings.row_height {
             vec![rh; rows]
-        } else if settings.col_widths.is_some() {
+        } else if have_widths {
             let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
             let mut heights = Vec::with_capacity(rows);
             for row in 0..rows {
                 let mut max_h = single_line_ru;
                 for col in 0..cols {
                     let cw = col_widths[col];
-                    if !cw.is_positive() { continue; }
+                    if !cw.is_positive() {
+                        continue;
+                    }
                     match &cells[row * cols + col] {
                         CellContent::Text(cell_text) | CellContent::Styled(cell_text, _, _) => {
                             let cell_px = match &cells[row * cols + col] {
@@ -2096,51 +2267,103 @@ impl VM {
                                 _ => px,
                             };
                             let wrap_px = cw * span_ru - (settings.padding << 1usize) * span_ru;
-                            if !wrap_px.is_positive() { continue; }
+                            if !wrap_px.is_positive() {
+                                continue;
+                            }
                             let font = self.font_cache.get(&font_key).unwrap();
                             layout.reset(&LayoutSettings {
                                 max_width: Some(wrap_px),
                                 line_height: ScalarF4E4::ONE,
                                 ..LayoutSettings::default()
                             });
-                            layout.append(&[font as &FontdueFont], &TextStyle::new(cell_text, cell_px, 0));
+                            layout.append(
+                                &[font as &FontdueFont],
+                                &TextStyle::new(cell_text, cell_px, 0),
+                            );
                             let glyphs = layout.glyphs();
                             if !glyphs.is_empty() {
                                 let last = &glyphs[glyphs.len() - 1];
                                 let text_bottom = last.y + last.height;
-                                if text_bottom > canvas_h_px { continue; }
+                                if text_bottom > canvas_h_px {
+                                    continue;
+                                }
                                 cell_text_heights[row * cols + col] = text_bottom / span_ru;
                                 let cell_h = text_bottom / span_ru + (settings.padding << 1usize);
-                                if cell_h > max_h { max_h = cell_h; }
+                                if cell_h > max_h {
+                                    max_h = cell_h;
+                                }
                             }
                         }
-                        CellContent::SubTable { cols: sub_cols, rows: sub_rows, cells: sub_cells, settings: sub_settings } => {
+                        CellContent::SubTable {
+                            cols: sub_cols,
+                            rows: sub_rows,
+                            cells: sub_cells,
+                            settings: sub_settings,
+                        } => {
                             // Measure sub-table height recursively
                             let padded_w = cw - (settings.padding << 1usize);
                             let mut sub_s = sub_settings.clone();
                             if let Some(ref ws) = sub_s.col_widths {
                                 // Scale explicit widths to fill parent cell
-                                let total: ScalarF4E4 = ws.iter().copied()
-                                    .fold(ScalarF4E4::ZERO, |a, b| a + b);
+                                let total: ScalarF4E4 =
+                                    ws.iter().copied().fold(ScalarF4E4::ZERO, |a, b| a + b);
                                 if total.is_positive() {
-                                    sub_s.col_widths = Some(ws.iter()
-                                        .map(|w| *w * padded_w / total)
-                                        .collect());
+                                    sub_s.col_widths =
+                                        Some(ws.iter().map(|w| *w * padded_w / total).collect());
                                 }
-                            } else {
-                                let sub_col_w = padded_w / *sub_cols as isize;
-                                sub_s.col_widths = Some(vec![sub_col_w; *sub_cols]);
                             }
+                            // No explicit widths: let render_table auto-fit to content
                             let dummy_pos = CircleF4E4::ZERO;
                             let sub_result = self.render_table(
-                                sub_cells, *sub_cols, *sub_rows, &sub_s, dummy_pos,
-                                font_key, font_bytes, size, text_colour,
-                                &[], depth + 1, true,
+                                sub_cells,
+                                *sub_cols,
+                                *sub_rows,
+                                &sub_s,
+                                dummy_pos,
+                                font_key,
+                                font_bytes,
+                                size,
+                                text_colour,
+                                &[],
+                                depth + 1,
+                                true,
                             )?;
                             let cell_h = sub_result.total_height + (settings.padding << 1usize);
-                            if cell_h > max_h { max_h = cell_h; }
+                            if cell_h > max_h {
+                                max_h = cell_h;
+                            }
                         }
-                        _ => {} // Button/TextInput: single-line height is fine
+                        CellContent::TextInput { id, .. } => {
+                            // Measure actual typed content for row height
+                            if let Some(state) = self.text_inputs.get(id) {
+                                let content = state.text();
+                                if content.contains('\n') {
+                                    let wrap_px = cw * span_ru - (settings.padding << 1usize) * span_ru;
+                                    if wrap_px.is_positive() {
+                                        let font = self.font_cache.get(&font_key).unwrap();
+                                        layout.reset(&LayoutSettings {
+                                            max_width: Some(wrap_px),
+                                            line_height: ScalarF4E4::ONE,
+                                            ..LayoutSettings::default()
+                                        });
+                                        layout.append(
+                                            &[font as &FontdueFont],
+                                            &TextStyle::new(&content, px, 0),
+                                        );
+                                        let glyphs = layout.glyphs();
+                                        if !glyphs.is_empty() {
+                                            let last = &glyphs[glyphs.len() - 1];
+                                            let text_bottom = last.y + last.height;
+                                            let cell_h = text_bottom / span_ru + (settings.padding << 1usize);
+                                            if cell_h > max_h {
+                                                max_h = cell_h;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        _ => {} // Button: single-line height is fine
                     }
                 }
                 heights.push(max_h);
@@ -2157,184 +2380,271 @@ impl VM {
         }
 
         // Draw backgrounds
-        if !measure_only { for row in 0..rows {
-            let rh = row_heights[row];
-            let row_pos = CircleF4E4::from((pos.r(), row_tops[row] + (rh >> 1usize)));
-            let row_size = CircleF4E4::from((table_width, rh));
-            if row == 0 {
-                if let Some(ref bg) = settings.header_bg {
-                    self.canvas.fill_rect_ru(row_pos, row_size, bg)?;
-                }
-            } else if row % 2 == 0 {
-                if let Some(ref bg) = settings.alt_row_bg {
-                    self.canvas.fill_rect_ru(row_pos, row_size, bg)?;
-                }
-            }
-        } }
-
-        // Draw grid lines
         if !measure_only {
-        if let (Some(ref border), Some(ref mask)) = (&settings.border_colour, &settings.grid_mask) {
-            for row_gap in 0..=rows {
-                for col in 0..cols {
-                    if mask.h_segment(row_gap, col, cols) {
-                        self.canvas.hline_ru(
-                            row_tops[row_gap], col_lefts[col],
-                            col_lefts[col] + col_widths[col], border,
-                        )?;
-                    }
-                }
-            }
             for row in 0..rows {
-                for col_gap in 0..=cols {
-                    if mask.v_segment(row, col_gap, cols + 1) {
-                        self.canvas.vline_ru(
-                            col_lefts[col_gap], row_tops[row],
-                            row_tops[row + 1], border,
-                        )?;
+                let rh = row_heights[row];
+                let row_pos = CircleF4E4::from((pos.r(), row_tops[row] + (rh >> 1usize)));
+                let row_size = CircleF4E4::from((table_width, rh));
+                if row == 0 {
+                    if let Some(ref bg) = settings.header_bg {
+                        self.canvas.fill_rect_ru(row_pos, row_size, bg)?;
+                    }
+                } else if row % 2 == 0 {
+                    if let Some(ref bg) = settings.alt_row_bg {
+                        self.canvas.fill_rect_ru(row_pos, row_size, bg)?;
                     }
                 }
             }
         }
+
+        // Draw grid lines
+        if !measure_only {
+            if let (Some(ref border), Some(ref mask)) =
+                (&settings.border_colour, &settings.grid_mask)
+            {
+                for row_gap in 0..=rows {
+                    for col in 0..cols {
+                        if mask.h_segment(row_gap, col, cols) {
+                            self.canvas.hline_ru(
+                                row_tops[row_gap],
+                                col_lefts[col],
+                                col_lefts[col] + col_widths[col],
+                                border,
+                            )?;
+                        }
+                    }
+                }
+                for row in 0..rows {
+                    for col_gap in 0..=cols {
+                        if mask.v_segment(row, col_gap, cols + 1) {
+                            self.canvas.vline_ru(
+                                col_lefts[col_gap],
+                                row_tops[row],
+                                row_tops[row + 1],
+                                border,
+                            )?;
+                        }
+                    }
+                }
+            }
         }
 
         // Draw cells (skip when measuring only)
         let mut widget_results: Vec<VsfType> = Vec::new();
-        if !measure_only { for row in 0..rows {
-            let rh = row_heights[row];
-            for col in 0..cols {
-                if !col_widths[col].is_positive() { continue; }
-                let cell_idx = row * cols + col;
-                let cell_center = CircleF4E4::from((
-                    col_lefts[col] + (col_widths[col] >> 1usize),
-                    row_tops[row] + (rh >> 1usize),
-                ));
-                let padded_w = col_widths[col] - (settings.padding << 1usize);
-                let padded_h = rh - (settings.padding << 1usize);
-
-                match &cells[cell_idx] {
-                    CellContent::Text(cell_text) | CellContent::Styled(cell_text, _, _) => {
-                        if query_cells.contains(&(row, col)) { continue; }
-                        let text_h = cell_text_heights[cell_idx];
-                        let (cell_colour, cell_size) = match &cells[cell_idx] {
-                            CellContent::Styled(_, c, sz) => (c, sz.unwrap_or(size)),
-                            _ => (text_colour, size),
-                        };
-
-                        let h = settings.h_align.as_ref()
-                            .and_then(|a| a.get(col).copied())
-                            .unwrap_or(b'c');
-                        let align = match h { b'l' => 1, b'r' => 2, _ => 0 };
-                        let cell_x = match h {
-                            b'l' => col_lefts[col] + settings.padding,
-                            b'r' => col_lefts[col + 1] - settings.padding,
-                            _ => col_lefts[col] + (col_widths[col] >> 1usize),
-                        };
-                        let v = settings.v_align.as_ref()
-                            .and_then(|a| a.get(col).copied())
-                            .unwrap_or(b'm');
-                        let rt = row_tops[row];
-                        let cell_y = match v {
-                            b't' => rt + settings.padding + (text_h >> 1usize),
-                            b'b' => rt + rh - settings.padding - (text_h >> 1usize),
-                            _ => rt + (rh >> 1usize),
-                        };
-                        let cell_pos = CircleF4E4::from((cell_x, cell_y));
-                        let wrap = if settings.col_widths.is_some() {
-                            let w = col_widths[col] - (settings.padding << 1usize);
-                            if w.is_positive() { Some(w) } else { None }
-                        } else { None };
-                        let text_settings = crate::drawing::TextSettings {
-                            align, wrap, ..Default::default()
-                        };
-                        self.canvas.draw_text(
-                            &mut self.font_cache, font_key, font_bytes,
-                            cell_pos, cell_size, cell_text, cell_colour, &text_settings,
-                        )?;
+        if !measure_only {
+            for row in 0..rows {
+                let rh = row_heights[row];
+                for col in 0..cols {
+                    if !col_widths[col].is_positive() {
+                        continue;
                     }
+                    let cell_idx = row * cols + col;
+                    let cell_center = CircleF4E4::from((
+                        col_lefts[col] + (col_widths[col] >> 1usize),
+                        row_tops[row] + (rh >> 1usize),
+                    ));
+                    let padded_w = col_widths[col] - (settings.padding << 1usize);
+                    let padded_h = rh - (settings.padding << 1usize);
 
-                    CellContent::Button { label, colour, id, action_url } => {
-                        let widget_id = *id;
-                        let btn_size = CircleF4E4::from((padded_w, padded_h));
-                        let half_w = padded_w >> 1usize;
-                        let half_h = padded_h >> 1usize;
-                        let left = cell_center.r() - half_w;
-                        let right = cell_center.r() + half_w;
-                        let top = cell_center.i() - half_h;
-                        let bottom = cell_center.i() + half_h;
+                    match &cells[cell_idx] {
+                        CellContent::Text(cell_text) | CellContent::Styled(cell_text, _, _) => {
+                            if query_cells.contains(&(row, col)) {
+                                continue;
+                            }
+                            let text_h = cell_text_heights[cell_idx];
+                            let (cell_colour, cell_size) = match &cells[cell_idx] {
+                                CellContent::Styled(_, c, sz) => (c, sz.unwrap_or(size)),
+                                _ => (text_colour, size),
+                            };
 
-                        self.hit_regions.push(HitRegion {
-                            x: left, y: top, w: padded_w, h: padded_h,
-                            widget_id, cursor: CursorKind::Pointer,
-                        });
-                        self.canvas.stroke_rect_ru(cell_center, btn_size, colour)?;
+                            let h = settings
+                                .h_align
+                                .as_ref()
+                                .and_then(|a| a.get(col).copied())
+                                .unwrap_or(b'c');
+                            let align = match h {
+                                b'l' => 1,
+                                b'r' => 2,
+                                _ => 0,
+                            };
+                            let cell_x = match h {
+                                b'l' => col_lefts[col] + settings.padding,
+                                b'r' => col_lefts[col + 1] - settings.padding,
+                                _ => col_lefts[col] + (col_widths[col] >> 1usize),
+                            };
+                            let v = settings
+                                .v_align
+                                .as_ref()
+                                .and_then(|a| a.get(col).copied())
+                                .unwrap_or(b'm');
+                            let rt = row_tops[row];
+                            let cell_y = match v {
+                                b't' => rt + settings.padding + (text_h >> 1usize),
+                                b'b' => rt + rh - settings.padding - (text_h >> 1usize),
+                                _ => rt + (rh >> 1usize),
+                            };
+                            let cell_pos = CircleF4E4::from((cell_x, cell_y));
+                            let wrap = if settings.col_widths.is_some() {
+                                let w = col_widths[col] - (settings.padding << 1usize);
+                                if w.is_positive() {
+                                    Some(w)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            let text_settings = crate::drawing::TextSettings {
+                                align,
+                                wrap,
+                                ..Default::default()
+                            };
+                            self.canvas.draw_text(
+                                &mut self.font_cache,
+                                font_key,
+                                font_bytes,
+                                cell_pos,
+                                cell_size,
+                                cell_text,
+                                cell_colour,
+                                &text_settings,
+                            )?;
+                        }
 
-                        let text_size = size;
-                        let text_settings = crate::drawing::TextSettings {
-                            align: 0, wrap: Some(padded_w), ..Default::default()
-                        };
-                        self.canvas.draw_text(
-                            &mut self.font_cache, font_key, font_bytes,
-                            cell_center, text_size, label, colour, &text_settings,
-                        )?;
+                        CellContent::Button {
+                            label,
+                            colour,
+                            id,
+                            action_url,
+                        } => {
+                            let widget_id = *id;
+                            let btn_size = CircleF4E4::from((padded_w, padded_h));
+                            let half_w = padded_w >> 1usize;
+                            let half_h = padded_h >> 1usize;
+                            let left = cell_center.r() - half_w;
+                            let right = cell_center.r() + half_w;
+                            let top = cell_center.i() - half_h;
+                            let bottom = cell_center.i() + half_h;
 
-                        let mut clicked = false;
-                        for event in &self.events {
-                            if let InputEvent::MouseDown { x, y } = event {
-                                if *x >= left && *x <= right && *y >= top && *y <= bottom {
-                                    clicked = true;
+                            self.hit_regions.push(HitRegion {
+                                x: left,
+                                y: top,
+                                w: padded_w,
+                                h: padded_h,
+                                widget_id,
+                                cursor: CursorKind::Pointer,
+                            });
+                            // Snapshot background before drawing button
+                            let (bg_pixels, px_x, px_y, px_w, px_h) =
+                                self.canvas.save_region_ru(cell_center, btn_size);
+                            self.widget_snapshots.push(WidgetSnapshot {
+                                widget_id,
+                                kind: WidgetSnapshotKind::Button {
+                                    label: label.clone(),
+                                    action_url: action_url.clone(),
+                                },
+                                pos: cell_center, size: btn_size,
+                                font_key, font_bytes: font_bytes.to_vec(),
+                                colour: colour.clone(),
+                                text_size: size,
+                                bg_pixels, px_x, px_y, px_w, px_h,
+                            });
+
+                            self.canvas.stroke_rect_ru(cell_center, btn_size, colour)?;
+                            let text_size = size;
+                            let text_settings = crate::drawing::TextSettings {
+                                align: 0,
+                                wrap: Some(padded_w),
+                                ..Default::default()
+                            };
+                            self.canvas.draw_text(
+                                &mut self.font_cache,
+                                font_key,
+                                font_bytes,
+                                cell_center,
+                                text_size,
+                                label,
+                                colour,
+                                &text_settings,
+                            )?;
+
+                            let mut clicked = false;
+                            for event in &self.events {
+                                if let InputEvent::MouseDown { x, y } = event {
+                                    let yc = *y + self.scroll_y;
+                                    if *x >= left && *x <= right && yc >= top && yc <= bottom {
+                                        clicked = true;
+                                    }
                                 }
                             }
-                        }
-                        if clicked {
-                            if let Some(url) = action_url {
-                                self.actions.push(url.clone());
+                            if clicked {
+                                if let Some(url) = action_url {
+                                    self.actions.push(url.clone());
+                                }
                             }
+                            widget_results.push(VsfType::s44(if clicked {
+                                ScalarF4E4::ONE
+                            } else {
+                                ScalarF4E4::ZERO
+                            }));
                         }
-                        widget_results.push(VsfType::s44(
-                            if clicked { ScalarF4E4::ONE } else { ScalarF4E4::ZERO }
-                        ));
-                    }
 
-                    CellContent::TextInput { placeholder, colour, id } => {
-                        let widget_id = *id;
-                        let input_size = CircleF4E4::from((padded_w, padded_h));
-                        if !self.text_inputs.contains_key(&widget_id) {
-                            self.text_inputs.insert(widget_id, TextInputState::new());
-                        }
-                        let half_w = padded_w >> 1usize;
-                        let half_h = padded_h >> 1usize;
-                        let left = cell_center.r() - half_w;
-                        let right = cell_center.r() + half_w;
-                        let top = cell_center.i() - half_h;
-                        let bottom = cell_center.i() + half_h;
+                        CellContent::TextInput {
+                            placeholder,
+                            colour,
+                            id,
+                        } => {
+                            let widget_id = *id;
+                            let input_size = CircleF4E4::from((padded_w, padded_h));
+                            if !self.text_inputs.contains_key(&widget_id) {
+                                self.text_inputs.insert(widget_id, TextInputState::new());
+                            }
+                            let half_w = padded_w >> 1usize;
+                            let half_h = padded_h >> 1usize;
+                            let left = cell_center.r() - half_w;
+                            let right = cell_center.r() + half_w;
+                            let top = cell_center.i() - half_h;
+                            let bottom = cell_center.i() + half_h;
 
-                        self.hit_regions.push(HitRegion {
-                            x: left, y: top, w: padded_w, h: padded_h,
-                            widget_id, cursor: CursorKind::Text,
-                        });
+                            self.hit_regions.push(HitRegion {
+                                x: left,
+                                y: top,
+                                w: padded_w,
+                                h: padded_h,
+                                widget_id,
+                                cursor: CursorKind::Text,
+                            });
 
-                        let is_focused = self.focused_widget == Some(widget_id);
-                        if is_focused {
-                            let state = self.text_inputs.get_mut(&widget_id).unwrap();
-                            for event in &self.events {
-                                match event {
-                                    InputEvent::KeyPress { text } => {
-                                        if let Some(anchor) = state.selection_anchor.take() {
-                                            let (start, end) = if anchor < state.cursor_pos { (anchor, state.cursor_pos) } else { (state.cursor_pos, anchor) };
-                                            state.chars.drain(start..end);
-                                            state.cursor_pos = start;
+                            let is_focused = self.focused_widget == Some(widget_id);
+                            if is_focused {
+                                let state = self.text_inputs.get_mut(&widget_id).unwrap();
+                                for event in &self.events {
+                                    match event {
+                                        InputEvent::KeyPress { text } => {
+                                            if let Some(anchor) = state.selection_anchor.take() {
+                                                let (start, end) = if anchor < state.cursor_pos {
+                                                    (anchor, state.cursor_pos)
+                                                } else {
+                                                    (state.cursor_pos, anchor)
+                                                };
+                                                state.chars.drain(start..end);
+                                                state.cursor_pos = start;
+                                            }
+                                            for ch in text.chars() {
+                                                state.chars.insert(state.cursor_pos, ch);
+                                                state.cursor_pos += 1;
+                                            }
                                         }
-                                        for ch in text.chars() {
-                                            state.chars.insert(state.cursor_pos, ch);
-                                            state.cursor_pos += 1;
-                                        }
-                                    }
-                                    InputEvent::KeyDown { key } => {
-                                        match key.as_str() {
+                                        InputEvent::KeyDown { key } => match key.as_str() {
                                             "Backspace" => {
-                                                if let Some(anchor) = state.selection_anchor.take() {
-                                                    let (start, end) = if anchor < state.cursor_pos { (anchor, state.cursor_pos) } else { (state.cursor_pos, anchor) };
+                                                if let Some(anchor) = state.selection_anchor.take()
+                                                {
+                                                    let (start, end) = if anchor < state.cursor_pos
+                                                    {
+                                                        (anchor, state.cursor_pos)
+                                                    } else {
+                                                        (state.cursor_pos, anchor)
+                                                    };
                                                     state.chars.drain(start..end);
                                                     state.cursor_pos = start;
                                                 } else if state.cursor_pos > 0 {
@@ -2343,110 +2653,147 @@ impl VM {
                                                 }
                                             }
                                             "Delete" => {
-                                                if let Some(anchor) = state.selection_anchor.take() {
-                                                    let (start, end) = if anchor < state.cursor_pos { (anchor, state.cursor_pos) } else { (state.cursor_pos, anchor) };
+                                                if let Some(anchor) = state.selection_anchor.take()
+                                                {
+                                                    let (start, end) = if anchor < state.cursor_pos
+                                                    {
+                                                        (anchor, state.cursor_pos)
+                                                    } else {
+                                                        (state.cursor_pos, anchor)
+                                                    };
                                                     state.chars.drain(start..end);
                                                     state.cursor_pos = start;
                                                 } else if state.cursor_pos < state.chars.len() {
                                                     state.chars.remove(state.cursor_pos);
                                                 }
                                             }
-                                            "ArrowLeft" => { if state.cursor_pos > 0 { state.cursor_pos -= 1; } state.selection_anchor = None; }
-                                            "ArrowRight" => { if state.cursor_pos < state.chars.len() { state.cursor_pos += 1; } state.selection_anchor = None; }
-                                            "Home" => { state.cursor_pos = 0; state.selection_anchor = None; }
-                                            "End" => { state.cursor_pos = state.chars.len(); state.selection_anchor = None; }
+                                            "ArrowLeft" => {
+                                                if state.cursor_pos > 0 {
+                                                    state.cursor_pos -= 1;
+                                                }
+                                                state.selection_anchor = None;
+                                            }
+                                            "ArrowRight" => {
+                                                if state.cursor_pos < state.chars.len() {
+                                                    state.cursor_pos += 1;
+                                                }
+                                                state.selection_anchor = None;
+                                            }
+                                            "Home" => {
+                                                state.cursor_pos = 0;
+                                                state.selection_anchor = None;
+                                            }
+                                            "End" => {
+                                                state.cursor_pos = state.chars.len();
+                                                state.selection_anchor = None;
+                                            }
                                             _ => {}
-                                        }
+                                        },
+                                        _ => {}
                                     }
-                                    _ => {}
                                 }
                             }
-                        }
 
-                        for event in &self.events {
-                            if let InputEvent::MouseDown { x, y } = event {
-                                if *x >= left && *x <= right && *y >= top && *y <= bottom {
-                                    self.focused_widget = Some(widget_id);
-                                    let state = self.text_inputs.get_mut(&widget_id).unwrap();
-                                    state.selection_anchor = None;
+                            for event in &self.events {
+                                if let InputEvent::MouseDown { x, y } = event {
+                                    let yc = *y + self.scroll_y;
+                                    if *x >= left && *x <= right && yc >= top && yc <= bottom {
+                                        self.focused_widget = Some(widget_id);
+                                        let state = self.text_inputs.get_mut(&widget_id).unwrap();
+                                        state.selection_anchor = None;
+                                    }
                                 }
                             }
-                        }
 
-                        self.canvas.stroke_rect_ru(cell_center, input_size, colour)?;
-                        let state = self.text_inputs.get(&widget_id).unwrap();
-                        let display_text = if state.chars.is_empty() {
-                            placeholder.clone()
-                        } else { state.text() };
-                        let text_size = padded_h * ScalarF4E4::from(2) / ScalarF4E4::from(3);
-                        let text_padding = padded_w / ScalarF4E4::from(40);
-                        let text_pos = CircleF4E4::from((left + text_padding, cell_center.i()));
-                        let display_colour = if state.chars.is_empty() {
-                            VsfType::ra([128, 128, 128, 255])
-                        } else { colour.clone() };
-                        let text_settings = crate::drawing::TextSettings {
-                            align: 1, ..Default::default()
-                        };
-                        self.canvas.draw_text(
-                            &mut self.font_cache, font_key, font_bytes,
-                            text_pos, text_size, &display_text, &display_colour, &text_settings,
-                        )?;
-
-                        if is_focused {
-                            let state = self.text_inputs.get(&widget_id).unwrap();
-                            let cursor_text: String = state.chars[..state.cursor_pos].iter().collect();
-                            let font = self.font_cache.get(&font_key);
-                            if let Some(font) = font {
-                                let cursor_px = text_size * span_ru;
-                                let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-                                layout.reset(&LayoutSettings::default());
-                                layout.append(&[font as &FontdueFont], &TextStyle::new(&cursor_text, cursor_px, 0));
-                                let cursor_w_px = layout.glyphs().iter()
-                                    .map(|g| g.x + g.width)
-                                    .fold(ScalarF4E4::ZERO, |a, b| if b > a { b } else { a });
-                                let cursor_x = left + text_padding + cursor_w_px / span_ru;
-                                self.canvas.vline_ru(cursor_x, top, bottom, colour)?;
+                            // Snapshot background + draw using shared method
+                            let (bg_pixels, px_x, px_y, px_w, px_h) =
+                                self.canvas.save_region_ru(cell_center, input_size);
+                            self.widget_snapshots.push(WidgetSnapshot {
+                                widget_id,
+                                kind: WidgetSnapshotKind::TextInput { placeholder: placeholder.clone() },
+                                pos: cell_center, size: input_size,
+                                font_key, font_bytes: font_bytes.to_vec(),
+                                colour: colour.clone(),
+                                text_size: size,
+                                bg_pixels, px_x, px_y, px_w, px_h,
+                            });
+                            let cursor_info = Self::draw_text_input_visual(
+                                &mut self.canvas, &mut self.font_cache,
+                                cell_center, input_size, colour, placeholder,
+                                font_key, font_bytes,
+                                self.text_inputs.get(&widget_id).unwrap(),
+                                is_focused,
+                                size,
+                            )?;
+                            if let Some((cx, cy, ch)) = cursor_info {
+                                let state = self.text_inputs.get_mut(&widget_id).unwrap();
+                                state.blinkey_px_x = cx;
+                                state.blinkey_px_y = cy;
+                                state.blinkey_px_h = ch;
+                                state.blinkey_wave_top = true;
+                                self.canvas.blinkey_add_top(cx, cy, ch);
+                                state.blinkey_visible = true;
                             }
+
+                            let result_text = self.text_inputs.get(&widget_id).unwrap().text();
+                            widget_results.push(VsfType::x(result_text));
                         }
 
-                        let result_text = self.text_inputs.get(&widget_id).unwrap().text();
-                        widget_results.push(VsfType::x(result_text));
-                    }
-
-                    CellContent::SubTable { cols: sub_cols, rows: sub_rows, cells: sub_cells, settings: sub_settings } => {
-                        // Recursive sub-table rendering — fill parent cell width
-                        let sub_pos = CircleF4E4::from((
-                            cell_center.r(),
-                            cell_center.i() - (padded_h >> 1usize),
-                        ));
-                        let mut sub_s = sub_settings.clone();
-                        if let Some(ref ws) = sub_s.col_widths {
-                            // Scale explicit widths to fill parent cell
-                            let total: ScalarF4E4 = ws.iter().copied()
-                                .fold(ScalarF4E4::ZERO, |a, b| a + b);
-                            if total.is_positive() {
-                                sub_s.col_widths = Some(ws.iter()
-                                    .map(|w| *w * padded_w / total)
-                                    .collect());
+                        CellContent::SubTable {
+                            cols: sub_cols,
+                            rows: sub_rows,
+                            cells: sub_cells,
+                            settings: sub_settings,
+                        } => {
+                            // Recursive sub-table rendering — left-aligned in parent cell
+                            let mut sub_s = sub_settings.clone();
+                            if let Some(ref ws) = sub_s.col_widths {
+                                // Scale explicit widths to fill parent cell
+                                let total: ScalarF4E4 =
+                                    ws.iter().copied().fold(ScalarF4E4::ZERO, |a, b| a + b);
+                                if total.is_positive() {
+                                    sub_s.col_widths =
+                                        Some(ws.iter().map(|w| *w * padded_w / total).collect());
+                                }
                             }
-                        } else {
-                            // Auto-distribute columns across available width
-                            let sub_col_w = padded_w / *sub_cols as isize;
-                            sub_s.col_widths = Some(vec![sub_col_w; *sub_cols]);
+                            // Measure first to get sub-table width, then left-align
+                            let measure = self.render_table(
+                                sub_cells, *sub_cols, *sub_rows, &sub_s,
+                                CircleF4E4::ZERO, font_key, font_bytes,
+                                size, text_colour, &[], depth + 1, true,
+                            )?;
+                            let sub_width: ScalarF4E4 = measure.col_widths.iter().copied().fold(ScalarF4E4::ZERO, |a, b| a + b);
+                            let cell_left = cell_center.r() - (padded_w >> 1usize);
+                            let sub_pos = CircleF4E4::from((
+                                cell_left + (sub_width >> 1usize),
+                                cell_center.i() - (padded_h >> 1usize),
+                            ));
+                            let sub_result = self.render_table(
+                                sub_cells,
+                                *sub_cols,
+                                *sub_rows,
+                                &sub_s,
+                                sub_pos,
+                                font_key,
+                                font_bytes,
+                                size,
+                                text_colour,
+                                &[],
+                                depth + 1,
+                                measure_only,
+                            )?;
+                            // Sub-table widget results bubble up
+                            widget_results.extend(sub_result.widget_results);
                         }
-                        let sub_result = self.render_table(
-                            sub_cells, *sub_cols, *sub_rows, &sub_s, sub_pos,
-                            font_key, font_bytes, size, text_colour,
-                            &[], depth + 1, measure_only,
-                        )?;
-                        // Sub-table widget results bubble up
-                        widget_results.extend(sub_result.widget_results);
                     }
                 }
             }
-        } }
+        }
 
-        let total_height = row_heights.iter().copied().fold(ScalarF4E4::ZERO, |a, b| a + b);
+        let total_height = row_heights
+            .iter()
+            .copied()
+            .fold(ScalarF4E4::ZERO, |a, b| a + b);
         Ok(RenderTableResult {
             total_height,
             widget_results,
@@ -2554,7 +2901,7 @@ impl VM {
             (VsfType::i6(a), VsfType::i6(b)) => a == b,
             (VsfType::i7(a), VsfType::i7(b)) => a == b,
             (VsfType::x(a), VsfType::x(b)) => a == b,
-            (VsfType::l(a), VsfType::l(b)) => a == b,
+            (VsfType::a(a), VsfType::a(b)) => a == b,
             (VsfType::d(a), VsfType::d(b)) => a == b,
             (VsfType::u0(a), VsfType::u0(b)) => a == b,
             (a, b) => {
@@ -2654,7 +3001,7 @@ impl VM {
             (VsfType::i6(a), VsfType::i6(b)) => a != b,
             (VsfType::i7(a), VsfType::i7(b)) => a != b,
             (VsfType::x(a), VsfType::x(b)) => a != b,
-            (VsfType::l(a), VsfType::l(b)) => a != b,
+            (VsfType::a(a), VsfType::a(b)) => a != b,
             (VsfType::d(a), VsfType::d(b)) => a != b,
             (VsfType::u0(a), VsfType::u0(b)) => a != b,
             (a, b) => {
@@ -3001,6 +3348,15 @@ impl VM {
         std::mem::take(&mut self.actions)
     }
 
+    /// Pop a single action as raw bytes. Returns None when queue is empty.
+    pub fn drain_action(&mut self) -> Option<Vec<u8>> {
+        if self.actions.is_empty() {
+            None
+        } else {
+            Some(self.actions.remove(0).into_bytes())
+        }
+    }
+
     /// Get hit regions registered this frame (for cursor management)
     pub fn hit_regions(&self) -> &[HitRegion] {
         &self.hit_regions
@@ -3016,19 +3372,27 @@ impl VM {
         self.text_inputs.get(&id)
     }
 
-    /// Check if a point (in RU) hits any registered widget
+    /// Check if a point (in screen-space RU) hits any registered widget
     pub fn hit_test(&self, x: ScalarF4E4, y: ScalarF4E4) -> Option<&HitRegion> {
+        // Convert screen-space Y to content-space (hit regions are stored in content coords)
+        let y_content = y + self.scroll_y;
         // Last registered wins (top-most in draw order)
-        self.hit_regions.iter().rev().find(|r| {
-            x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
-        })
+        self.hit_regions
+            .iter()
+            .rev()
+            .find(|r| x >= r.x && x <= r.x + r.w && y_content >= r.y && y_content <= r.y + r.h)
     }
 
     /// Process a click event — update focus based on hit testing
     fn process_click(&mut self, x: ScalarF4E4, y: ScalarF4E4) -> Option<u32> {
+        // Convert screen-space Y to content-space (hit regions stored in content coords)
+        let y_content = y + self.scroll_y;
         // Find which widget was clicked
-        let clicked_id = self.hit_regions.iter().rev()
-            .find(|r| x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h)
+        let clicked_id = self
+            .hit_regions
+            .iter()
+            .rev()
+            .find(|r| x >= r.x && x <= r.x + r.w && y_content >= r.y && y_content <= r.y + r.h)
             .map(|r| r.widget_id);
 
         // Update focus
@@ -3043,6 +3407,291 @@ impl VM {
         }
 
         clicked_id
+    }
+
+    /// Draw a text input widget's visual content (border + text + cursor).
+    /// Shared between full render and differential rerender.
+    fn draw_text_input_visual(
+        canvas: &mut Canvas,
+        font_cache: &mut FontCache,
+        pos: CircleF4E4,
+        size: CircleF4E4,
+        colour: &VsfType,
+        placeholder: &str,
+        font_key: [u8; 32],
+        font_bytes: &[u8],
+        state: &TextInputState,
+        is_focused: bool,
+        text_size: ScalarF4E4,
+    ) -> Result<Option<(usize, usize, usize)>, String> {
+        // Draw 1px hairline border
+        canvas.stroke_rect_ru(pos, size, colour)?;
+
+        // Text content or placeholder (placeholder only when unfocused and empty)
+        let show_placeholder = !is_focused && state.chars.is_empty();
+        let display_text = if show_placeholder {
+            placeholder.to_string()
+        } else {
+            state.text()
+        };
+        let half_w = size.r() >> 1usize;
+        let half_h = size.i() >> 1usize;
+        let left = pos.r() - half_w;
+        let padding = text_size / 4;
+        let wrap_w = size.r() - (padding << 1usize);
+        let text_pos = CircleF4E4::from((left + padding, pos.i()));
+
+        let display_colour = if show_placeholder {
+            VsfType::ra([128, 128, 128, 255])
+        } else {
+            colour.clone()
+        };
+        let text_settings = crate::drawing::TextSettings {
+            align: 1, // left-align
+            wrap: Some(wrap_w),
+            ..Default::default()
+        };
+        canvas.draw_text(
+            font_cache, font_key, font_bytes,
+            text_pos, text_size, &display_text, &display_colour, &text_settings,
+        )?;
+
+        // Compute cursor pixel position (for blinkey — caller manages add/subtract)
+        if is_focused {
+            let cursor_text: String = state.chars[..state.cursor_pos].iter().collect();
+            let font = font_cache.get(&font_key);
+            if let Some(font) = font {
+                use fontdue::{layout::*, Font as FontdueFont};
+                let span_ru = canvas.span() * canvas.ru();
+                let px = text_size * span_ru;
+                let wrap_px = wrap_w * span_ru;
+                let anchor_x_px = ScalarF4E4::from(canvas.ru_to_px_x(left + padding));
+                let anchor_y_px = ScalarF4E4::from(canvas.ru_to_px_y(pos.i()));
+
+                // Layout full display text to compute vertical centering shift
+                // (must match draw_text's shift_y calculation)
+                let full_text = &display_text;
+                let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
+                layout.reset(&LayoutSettings {
+                    x: anchor_x_px,
+                    y: anchor_y_px,
+                    max_width: Some(wrap_px),
+                    horizontal_align: HorizontalAlign::Left,
+                    line_height: ScalarF4E4::ONE,
+                    ..LayoutSettings::default()
+                });
+                layout.append(
+                    &[font as &FontdueFont],
+                    &TextStyle::new(full_text, px, 0),
+                );
+                let full_glyphs = layout.glyphs();
+                let shift_y = if full_glyphs.is_empty() {
+                    ScalarF4E4::ZERO
+                } else {
+                    let mut min_y = full_glyphs[0].y;
+                    let mut max_y = full_glyphs[0].y + full_glyphs[0].height;
+                    for g in full_glyphs.iter().skip(1) {
+                        if g.y < min_y { min_y = g.y; }
+                        let bottom = g.y + g.height;
+                        if bottom > max_y { max_y = bottom; }
+                    }
+                    let actual_h = max_y - min_y;
+                    anchor_y_px - (actual_h >> 1usize) - min_y
+                };
+
+                // Now layout cursor text with same settings to find cursor position
+                layout.reset(&LayoutSettings {
+                    x: anchor_x_px,
+                    y: anchor_y_px,
+                    max_width: Some(wrap_px),
+                    horizontal_align: HorizontalAlign::Left,
+                    line_height: ScalarF4E4::ONE,
+                    ..LayoutSettings::default()
+                });
+                layout.append(
+                    &[font as &FontdueFont],
+                    &TextStyle::new(&cursor_text, px, 0),
+                );
+                let glyphs = layout.glyphs();
+                let (cursor_x_px, cursor_y_px) = if glyphs.is_empty() {
+                    (anchor_x_px, anchor_y_px + shift_y)
+                } else {
+                    let last = &glyphs[glyphs.len() - 1];
+                    (last.x + last.width, last.y + shift_y)
+                };
+                let cursor_px_x = cursor_x_px.to_i32().max(0) as usize;
+                let cursor_px_y = cursor_y_px.to_i32().max(0) as usize;
+                let line_h_px = (px + px / 4u8).to_i32().max(2) as usize;
+                return Ok(Some((cursor_px_x, cursor_px_y, line_h_px)));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Differential rerender — update only widget visuals without re-executing VM.
+    ///
+    /// Processes keyboard/mouse events to update widget state, then redraws
+    /// only the widget regions using cached background pixels. Returns true
+    /// if any widget was actually redrawn.
+    ///
+    /// Use for keystrokes and cursor blinks. Use full `rerun()` for button clicks
+    /// that need post-table stack processing (actions).
+    pub fn rerun_widgets(&mut self) -> Result<bool, String> {
+        if self.widget_snapshots.is_empty() {
+            return Ok(false);
+        }
+
+        // Process focus changes from mouse events
+        for event in &self.events {
+            if let InputEvent::MouseDown { x, y } = event {
+                // Convert screen-space Y to content-space
+                let y_content = *y + self.scroll_y;
+                let clicked_id = self.hit_regions.iter().rev()
+                    .find(|r| *x >= r.x && *x <= r.x + r.w && y_content >= r.y && y_content <= r.y + r.h)
+                    .map(|r| r.widget_id);
+                self.focused_widget = clicked_id;
+            }
+        }
+
+        // Process keyboard events for focused text input
+        if let Some(focused_id) = self.focused_widget {
+            if let Some(state) = self.text_inputs.get_mut(&focused_id) {
+                for event in &self.events {
+                    match event {
+                        InputEvent::KeyPress { text } => {
+                            if let Some(anchor) = state.selection_anchor.take() {
+                                let (start, end) = if anchor < state.cursor_pos {
+                                    (anchor, state.cursor_pos)
+                                } else {
+                                    (state.cursor_pos, anchor)
+                                };
+                                state.chars.drain(start..end);
+                                state.cursor_pos = start;
+                            }
+                            for ch in text.chars() {
+                                state.chars.insert(state.cursor_pos, ch);
+                                state.cursor_pos += 1;
+                            }
+                        }
+                        InputEvent::KeyDown { key } => match key.as_str() {
+                            "Backspace" => {
+                                if let Some(anchor) = state.selection_anchor.take() {
+                                    let (start, end) = if anchor < state.cursor_pos {
+                                        (anchor, state.cursor_pos)
+                                    } else {
+                                        (state.cursor_pos, anchor)
+                                    };
+                                    state.chars.drain(start..end);
+                                    state.cursor_pos = start;
+                                } else if state.cursor_pos > 0 {
+                                    state.cursor_pos -= 1;
+                                    state.chars.remove(state.cursor_pos);
+                                }
+                            }
+                            "Delete" => {
+                                if let Some(anchor) = state.selection_anchor.take() {
+                                    let (start, end) = if anchor < state.cursor_pos {
+                                        (anchor, state.cursor_pos)
+                                    } else {
+                                        (state.cursor_pos, anchor)
+                                    };
+                                    state.chars.drain(start..end);
+                                    state.cursor_pos = start;
+                                } else if state.cursor_pos < state.chars.len() {
+                                    state.chars.remove(state.cursor_pos);
+                                }
+                            }
+                            "ArrowLeft" => {
+                                if state.cursor_pos > 0 { state.cursor_pos -= 1; }
+                                state.selection_anchor = None;
+                            }
+                            "ArrowRight" => {
+                                if state.cursor_pos < state.chars.len() { state.cursor_pos += 1; }
+                                state.selection_anchor = None;
+                            }
+                            "Home" => {
+                                state.cursor_pos = 0;
+                                state.selection_anchor = None;
+                            }
+                            "End" => {
+                                state.cursor_pos = state.chars.len();
+                                state.selection_anchor = None;
+                            }
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Redraw only text input widgets (buttons are static during keyboard interaction)
+        let snapshots = std::mem::take(&mut self.widget_snapshots);
+        for snap in &snapshots {
+            if let WidgetSnapshotKind::TextInput { ref placeholder } = snap.kind {
+                // Stop existing blinkey before restoring background
+                if let Some(state) = self.text_inputs.get(&snap.widget_id) {
+                    if state.blinkey_visible {
+                        if state.blinkey_wave_top {
+                            self.canvas.blinkey_sub_top(state.blinkey_px_x, state.blinkey_px_y, state.blinkey_px_h);
+                        } else {
+                            self.canvas.blinkey_sub_bottom(state.blinkey_px_x, state.blinkey_px_y, state.blinkey_px_h);
+                        }
+                        self.text_inputs.get_mut(&snap.widget_id).unwrap().blinkey_visible = false;
+                    }
+                }
+                // Restore background pixels, then redraw with current state
+                self.canvas.restore_region(&snap.bg_pixels, snap.px_x, snap.px_y, snap.px_w, snap.px_h);
+                let is_focused = self.focused_widget == Some(snap.widget_id);
+                if let Some(state) = self.text_inputs.get(&snap.widget_id) {
+                    let cursor_info = Self::draw_text_input_visual(
+                        &mut self.canvas, &mut self.font_cache,
+                        snap.pos, snap.size, &snap.colour, placeholder,
+                        snap.font_key, &snap.font_bytes,
+                        state, is_focused,
+                        snap.text_size,
+                    )?;
+                    if let Some((cx, cy, ch)) = cursor_info {
+                        let state = self.text_inputs.get_mut(&snap.widget_id).unwrap();
+                        state.blinkey_px_x = cx;
+                        state.blinkey_px_y = cy;
+                        state.blinkey_px_h = ch;
+                        state.blinkey_wave_top = true;
+                        self.canvas.blinkey_add_top(cx, cy, ch);
+                        state.blinkey_visible = true;
+                    }
+                }
+            }
+            // Buttons: skip — they don't change on keystrokes, full rerun handles clicks
+        }
+        self.widget_snapshots = snapshots;
+        self.events.clear();
+        Ok(true)
+    }
+
+    /// Flip the blinkey cursor animation — called by JS on a timer.
+    /// Subtracts current wave, adds opposite wave. No background restore needed.
+    pub fn flip_blinkey(&mut self) {
+        if let Some(focused_id) = self.focused_widget {
+            if let Some(state) = self.text_inputs.get_mut(&focused_id) {
+                if !state.blinkey_visible { return; }
+                let (px_x, px_y, px_h) = (state.blinkey_px_x, state.blinkey_px_y, state.blinkey_px_h);
+                if state.blinkey_wave_top {
+                    self.canvas.blinkey_sub_top(px_x, px_y, px_h);
+                    self.canvas.blinkey_add_bottom(px_x, px_y, px_h);
+                    state.blinkey_wave_top = false;
+                } else {
+                    self.canvas.blinkey_sub_bottom(px_x, px_y, px_h);
+                    self.canvas.blinkey_add_top(px_x, px_y, px_h);
+                    state.blinkey_wave_top = true;
+                }
+            }
+        }
+    }
+
+    /// Check if widget snapshots exist (differential rerender is available)
+    pub fn has_widget_snapshots(&self) -> bool {
+        !self.widget_snapshots.is_empty()
     }
 }
 
@@ -3116,7 +3765,7 @@ fn type_name(v: &VsfType) -> &'static str {
         VsfType::j5(_) => "j5",
         VsfType::j6(_) => "j6",
         VsfType::x(_) => "x",
-        VsfType::l(_) => "l",
+        VsfType::a(_) => "l",
         VsfType::d(_) => "d",
         VsfType::rck
         | VsfType::rcw

@@ -48,7 +48,8 @@ impl CanvasFast {
         let anchor_x = self.ru_to_px_x(pos.r());
         let anchor_y = self.ru_to_px_y(pos.i());
         let canvas_w = self.coords.width as isize;
-        let canvas_h = self.coords.height as isize;
+        let clip_min = self.coords.clip_y_min as isize;
+        let clip_max = self.coords.clip_y_max as isize;
 
         // Layout starts at anchor_y; shift_y (computed after layout) will
         // correct vertical position to center the full text block on anchor_y.
@@ -153,8 +154,8 @@ impl CanvasFast {
             let gx = (glyph.x + shift_x).floor().to_isize();
             let gy = (glyph.y + shift_y).floor().to_isize();
 
-            let row_start = ((-gy).max(0)) as isize;
-            let row_end = ((canvas_h - gy).min(glyph_h)) as isize;
+            let row_start = ((clip_min - gy).max(0)) as isize;
+            let row_end = ((clip_max - gy).min(glyph_h)) as isize;
             let col_start = ((-gx).max(0)) as isize;
             let col_end = ((canvas_w - gx).min(glyph_w)) as isize;
 

@@ -46,6 +46,9 @@ pub struct CanvasQuality {
     /// Half dimensions (width, height) for center-origin coordinate calculations
     half_dims: CircleF4E4,
 
+    /// Scroll Y offset in RU
+    scroll_y: ScalarF4E4,
+
     /// Pixel buffer: linear RGBA S44 per pixel
     /// Composited in linear light; sRGB OETF applied at to_rgba_bytes()
     pixels: Vec<Pixel>,
@@ -60,6 +63,7 @@ impl CanvasQuality {
             span: ScalarF4E4::from(width * height) / (width + height),
             ru: ScalarF4E4::ONE,
             half_dims: CircleF4E4::from((width, height)) >> 1,
+            scroll_y: ScalarF4E4::ZERO,
             pixels: vec![BLACK; width * height],
         }
     }
@@ -79,6 +83,20 @@ impl CanvasQuality {
         self.ru = ru.clamp(sf!(0.125), ScalarF4E4::from(8));
     }
 
+    /// Get scroll Y offset in RU
+    pub fn scroll_y(&self) -> ScalarF4E4 { self.scroll_y }
+
+    /// Set scroll Y offset in RU
+    pub fn set_scroll_y(&mut self, scroll_y: ScalarF4E4) {
+        self.scroll_y = scroll_y;
+    }
+
+    /// Set clip Y bounds (stub — quality pipeline doesn't clip yet)
+    pub fn set_clip_y(&mut self, _min: usize, _max: usize) {}
+
+    /// Clear clip Y bounds (stub)
+    pub fn clear_clip_y(&mut self) {}
+
     /// Adjust zoom by steps (positive = zoom in, negative = zoom out)
     /// Uses logarithmic scaling: each step multiplies by 33/32 (in) or 32/33 (out)
     pub fn adjust_zoom(&mut self, steps: ScalarF4E4) {
@@ -87,8 +105,8 @@ impl CanvasQuality {
         let is_zoom_in = steps_i > 0;
 
         let mut factor = ScalarF4E4::ONE;
-        let zoom_in_ratio = ScalarF4E4::from(33) / ScalarF4E4::from(32);
-        let zoom_out_ratio = ScalarF4E4::from(32) / ScalarF4E4::from(33);
+        let zoom_in_ratio = ScalarF4E4::from(33) / 32;
+        let zoom_out_ratio = ScalarF4E4::from(32) / 33;
 
         for _ in 0..step_count {
             if is_zoom_in {
@@ -114,7 +132,7 @@ impl CanvasQuality {
 
     /// Convert RU Y coordinate to pixel coordinate
     pub(crate) fn ru_to_px_y(&self, y: ScalarF4E4) -> isize {
-        let py = self.half_dims.i() + y * self.span * self.ru;
+        let py = self.half_dims.i() + (y - self.scroll_y) * self.span * self.ru;
         py.to_isize()
     }
 
@@ -171,6 +189,7 @@ impl CanvasQuality {
             span: ScalarF4E4::from(width * height) / (width + height),
             ru: ScalarF4E4::ONE,
             half_dims: CircleF4E4::from((width, height)) >> 1,
+            scroll_y: ScalarF4E4::ZERO,
             pixels: vec![transparent; width * height],
         };
         layer.set_ru(ru);
@@ -217,10 +236,10 @@ impl CanvasQuality {
             let a_u8 = a_enc.to_u8();
 
             // Compute remainder and carry forward
-            err_r = r_enc - ScalarF4E4::from(r_u8);
-            err_g = g_enc - ScalarF4E4::from(g_u8);
-            err_b = b_enc - ScalarF4E4::from(b_u8);
-            err_a = a_enc - ScalarF4E4::from(a_u8);
+            err_r = r_enc - r_u8;
+            err_g = g_enc - g_u8;
+            err_b = b_enc - b_u8;
+            err_a = a_enc - a_u8;
 
             bytes.push(r_u8);
             bytes.push(g_u8);

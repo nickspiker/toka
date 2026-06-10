@@ -98,17 +98,25 @@ fn build_roa_from_cell_data(
     // Cell content: header row first, then data rows
     // Use VsfType::l (ASCII) not VsfType::x (Huffman) — roa is flattened without 'text' feature
     for h in headers {
-        children.push(VsfType::l(h.to_string()));
+        children.push(VsfType::a(h.to_string()));
     }
     for row in rows {
         for cell in *row {
             match cell {
-                CellData::Text(s) => children.push(VsfType::l(s.to_string())),
-                CellData::Styled { text: s, .. } => {
-                    children.push(VsfType::l(s.to_string()));
+                CellData::Text(s) => children.push(VsfType::a(s.to_string())),
+                CellData::Styled { text: s, colour, size: sz } => {
+                    // Encode as: text (l), optional size (s44), colour (ra)
+                    // VM parser pops: colour first, then optional s44, then text
+                    children.push(VsfType::a(s.to_string()));
+                    if let Some(size_val) = sz {
+                        children.push(VsfType::s44(ScalarF4E4::from_f32(*size_val)));
+                    }
+                    let mut ptr = 0;
+                    let colour_vsf = vsf::parse::parse(colour, &mut ptr)
+                        .expect("SubTable Styled: invalid colour bytes");
+                    children.push(colour_vsf);
                 }
-                CellData::Button { label, colour, id: _, action: _ } => {
-                    // Sub-table buttons: display-only (one entry per cell)
+                CellData::Button { label, colour, id, action } => {
                     let mut ptr = 0;
                     let colour_vsf = vsf::parse::parse(colour, &mut ptr)
                         .expect("SubTable Button: invalid colour bytes");
@@ -117,9 +125,10 @@ fn build_roa_from_cell_data(
                         label.to_string(), ButtonVariant::Filled,
                         Box::new(colour_vsf),
                     ));
+                    children.push(VsfType::u5(*id));
+                    children.push(VsfType::a(action.to_string()));
                 }
-                CellData::TextInput { placeholder, colour, id: _ } => {
-                    // Sub-table text inputs: display-only (one entry per cell)
+                CellData::TextInput { placeholder, colour, id } => {
                     let mut ptr = 0;
                     let colour_vsf = vsf::parse::parse(colour, &mut ptr)
                         .expect("SubTable TextInput: invalid colour bytes");
@@ -128,6 +137,7 @@ fn build_roa_from_cell_data(
                         placeholder.to_string(),
                         Box::new(colour_vsf),
                     ));
+                    children.push(VsfType::u5(*id));
                 }
                 CellData::SubTable { headers: sh, rows: sr, col_widths: sw, h_align: sa,
                                      border: sb, header_bg: shb, alt_row_bg: sab, padding: sp } => {
@@ -141,36 +151,36 @@ fn build_roa_from_cell_data(
 
     // Settings tags (after cell data)
     if let Some(widths) = col_widths {
-        children.push(VsfType::l("x".to_string()));
+        children.push(VsfType::a("x".to_string()));
         for &w in widths {
             children.push(VsfType::s44(ScalarF4E4::from_f32(w)));
         }
     }
     if let Some(align) = h_align {
-        children.push(VsfType::l("j".to_string()));
-        children.push(VsfType::l(align.to_string()));
+        children.push(VsfType::a("j".to_string()));
+        children.push(VsfType::a(align.to_string()));
     }
     if let Some((colour, mask)) = border {
-        children.push(VsfType::l("b".to_string()));
+        children.push(VsfType::a("b".to_string()));
         let mut ptr = 0;
         children.push(vsf::parse::parse(colour, &mut ptr)
             .expect("SubTable border: invalid colour bytes"));
         children.push(VsfType::v(b'b', mask.to_vec()));
     }
     if let Some(colour) = header_bg {
-        children.push(VsfType::l("h".to_string()));
+        children.push(VsfType::a("h".to_string()));
         let mut ptr = 0;
         children.push(vsf::parse::parse(colour, &mut ptr)
             .expect("SubTable header_bg: invalid colour bytes"));
     }
     if let Some(colour) = alt_row_bg {
-        children.push(VsfType::l("a".to_string()));
+        children.push(VsfType::a("a".to_string()));
         let mut ptr = 0;
         children.push(vsf::parse::parse(colour, &mut ptr)
             .expect("SubTable alt_row_bg: invalid colour bytes"));
     }
     if let Some(pad) = padding {
-        children.push(VsfType::l("p".to_string()));
+        children.push(VsfType::a("p".to_string()));
         children.push(VsfType::s44(ScalarF4E4::from_f32(pad)));
     }
 
@@ -398,7 +408,7 @@ impl Program {
     pub fn ps_str(mut self, s: &str) -> Self {
         emit_op(&mut self.bytecode, b'p', b's');
         self.bytecode
-            .extend_from_slice(&VsfType::l(s.to_string()).flatten());
+            .extend_from_slice(&VsfType::a(s.to_string()).flatten());
         self
     }
 
@@ -862,10 +872,10 @@ impl Program {
         emit_op(&mut self.bytecode, b'p', b's');
         self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(wrap_width)).flatten());
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("x".to_string()).flatten());
         // Push left-align tag
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("l".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("l".to_string()).flatten());
         emit_op(&mut self.bytecode, b'd', b't');
         self
     }
@@ -876,16 +886,16 @@ impl Program {
         emit_op(&mut self.bytecode, b'p', b's');
         self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(wrap_width)).flatten());
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("x".to_string()).flatten());
         // Alignment tag
         match align {
             1 => {
                 emit_op(&mut self.bytecode, b'p', b's');
-                self.bytecode.extend_from_slice(&VsfType::l("l".to_string()).flatten());
+                self.bytecode.extend_from_slice(&VsfType::a("l".to_string()).flatten());
             }
             2 => {
                 emit_op(&mut self.bytecode, b'p', b's');
-                self.bytecode.extend_from_slice(&VsfType::l("r".to_string()).flatten());
+                self.bytecode.extend_from_slice(&VsfType::a("r".to_string()).flatten());
             }
             _ => {} // center = default, no tag needed
         }
@@ -899,7 +909,7 @@ impl Program {
         emit_op(&mut self.bytecode, b'p', b's');
         self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(leading)).flatten());
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("e".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("e".to_string()).flatten());
         emit_op(&mut self.bytecode, b'd', b't');
         self
     }
@@ -921,7 +931,7 @@ impl Program {
         emit_op(&mut self.bytecode, b'p', b's');
         self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(weight)).flatten());
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("w".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("w".to_string()).flatten());
         emit_op(&mut self.bytecode, b'd', b'l');
         self
     }
@@ -930,7 +940,7 @@ impl Program {
     /// Stack before call: start(c44), end(c44), colour
     pub fn dl_pixel(mut self) -> Self {
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("p".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("p".to_string()).flatten());
         emit_op(&mut self.bytecode, b'd', b'l');
         self
     }
@@ -943,12 +953,12 @@ impl Program {
         emit_op(&mut self.bytecode, b'p', b's');
         self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(weight)).flatten());
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("w".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("w".to_string()).flatten());
         // Cap (both)
         emit_op(&mut self.bytecode, b'p', b's');
         self.bytecode.extend_from_slice(&VsfType::u3(1).flatten());
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("c".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("c".to_string()).flatten());
         emit_op(&mut self.bytecode, b'd', b'l');
         self
     }
@@ -1114,52 +1124,52 @@ impl Program {
             }
             self = self.ps_u32(qc.len() as u32);
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("q".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("q".to_string()).flatten());
         }
 
         // Alignment tags (optional)
         if let Some(va) = v_align {
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l(va.to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a(va.to_string()).flatten());
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("v".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("v".to_string()).flatten());
         }
         if let Some(ha) = h_align {
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l(ha.to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a(ha.to_string()).flatten());
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("j".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("j".to_string()).flatten());
         }
         // Padding (optional)
         if let Some(pad) = padding {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(pad)).flatten());
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("p".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("p".to_string()).flatten());
         }
         // Border: grid mask + colour (always paired)
         if let Some((colour, mask)) = border {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(&VsfType::v(b'b', mask.to_vec()).flatten());
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("g".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("g".to_string()).flatten());
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(colour);
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("b".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("b".to_string()).flatten());
         }
         // Styling tags (optional)
         if let Some(alt) = alt_row_bg {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(alt);
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("a".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("a".to_string()).flatten());
         }
         if let Some(header) = header_bg {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(header);
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("h".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("h".to_string()).flatten());
         }
         // Per-column widths
         if let Some(ws) = col_widths {
@@ -1168,7 +1178,7 @@ impl Program {
                 self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(w)).flatten());
             }
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("x".to_string()).flatten());
         } else if let Some(fracs) = col_fractions {
             // Responsive widths — emit {cw} frac {ml} per column
             for &frac in fracs {
@@ -1178,7 +1188,7 @@ impl Program {
                 emit_op(&mut self.bytecode, b'm', b'l'); // {ml}
             }
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("x".to_string()).flatten());
         }
 
         // Cell data — push strings first (they'll be under the 'd' tag)
@@ -1193,17 +1203,17 @@ impl Program {
         }
         // 'd' tag tells VM to pop cols*rows strings
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("d".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("d".to_string()).flatten());
 
         // Row count
         self = self.ps_u32(total_rows as u32);
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("r".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("r".to_string()).flatten());
 
         // Column count (must come before 'r' and 'd' in parse order, so pushed last)
         self = self.ps_u32(cols as u32);
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("c".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("c".to_string()).flatten());
 
         // Emit draw_table opcode
         emit_op(&mut self.bytecode, b't', b'b');
@@ -1238,43 +1248,43 @@ impl Program {
         // Tags — pushed top-down, VM pops top-first
         if let Some(va) = v_align {
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l(va.to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a(va.to_string()).flatten());
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("v".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("v".to_string()).flatten());
         }
         if let Some(ha) = h_align {
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l(ha.to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a(ha.to_string()).flatten());
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("j".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("j".to_string()).flatten());
         }
         if let Some(pad) = padding {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(&VsfType::s44(ScalarF4E4::from_f32(pad)).flatten());
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("p".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("p".to_string()).flatten());
         }
         if let Some((colour, mask)) = border {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(&VsfType::v(b'b', mask.to_vec()).flatten());
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("g".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("g".to_string()).flatten());
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(colour);
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("b".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("b".to_string()).flatten());
         }
         if let Some(alt) = alt_row_bg {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(alt);
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("a".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("a".to_string()).flatten());
         }
         if let Some(header) = header_bg {
             emit_op(&mut self.bytecode, b'p', b's');
             self.bytecode.extend_from_slice(header);
             emit_op(&mut self.bytecode, b'p', b's');
-            self.bytecode.extend_from_slice(&VsfType::l("h".to_string()).flatten());
+            self.bytecode.extend_from_slice(&VsfType::a("h".to_string()).flatten());
         }
         // Responsive column widths
         for &frac in col_fractions {
@@ -1284,7 +1294,7 @@ impl Program {
             emit_op(&mut self.bytecode, b'm', b'l');
         }
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("x".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("x".to_string()).flatten());
 
         // Cell data — headers (always text), then data rows (mixed)
         for h in headers {
@@ -1349,17 +1359,17 @@ impl Program {
             }
         }
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("d".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("d".to_string()).flatten());
 
         // Row count
         self = self.ps_u32(total_rows as u32);
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("r".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("r".to_string()).flatten());
 
         // Column count
         self = self.ps_u32(cols as u32);
         emit_op(&mut self.bytecode, b'p', b's');
-        self.bytecode.extend_from_slice(&VsfType::l("c".to_string()).flatten());
+        self.bytecode.extend_from_slice(&VsfType::a("c".to_string()).flatten());
 
         // Emit draw_table opcode
         emit_op(&mut self.bytecode, b't', b'b');
@@ -1521,6 +1531,10 @@ impl Program {
     /// Action: pop URL, pop condition; if condition != 0, queue URL for JS POST
     /// VSF: {ac}
     pub fn ac(mut self) -> Self { emit_op(&mut self.bytecode, b'a', b'c'); self }
+
+    /// String concat: pop b, pop a; push a+b
+    /// VSF: {sc}
+    pub fn sc(mut self) -> Self { emit_op(&mut self.bytecode, b's', b'c'); self }
 
     /// Convenience: emit a button that triggers an HTTP POST action on click
     /// Combines draw_button + action — pushes button, then conditionally queues URL

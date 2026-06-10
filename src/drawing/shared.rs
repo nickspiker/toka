@@ -21,6 +21,11 @@ pub struct RuCoords {
     pub span: ScalarF4E4,
     pub ru: ScalarF4E4,
     pub half_dims: CircleF4E4,
+    pub scroll_y: ScalarF4E4,
+    /// Clip Y bounds (pixel rows). Drawing is restricted to clip_y_min..clip_y_max.
+    /// Default: 0..height (full canvas). Set to exposed strip during scroll.
+    pub clip_y_min: usize,
+    pub clip_y_max: usize,
 }
 
 impl RuCoords {
@@ -31,6 +36,9 @@ impl RuCoords {
             span: ScalarF4E4::from(width * height) / (width + height),
             ru: ScalarF4E4::ONE,
             half_dims: CircleF4E4::from((width, height)) >> 1,
+            scroll_y: ScalarF4E4::ZERO,
+            clip_y_min: 0,
+            clip_y_max: height,
         }
     }
 
@@ -44,13 +52,29 @@ impl RuCoords {
         self.ru = ru.clamp(sf!(0.125), ScalarF4E4::from(8));
     }
 
+    pub fn set_scroll_y(&mut self, scroll_y: ScalarF4E4) {
+        self.scroll_y = scroll_y;
+    }
+
+    /// Restrict drawing to pixel rows clip_y_min..clip_y_max
+    pub fn set_clip_y(&mut self, min: usize, max: usize) {
+        self.clip_y_min = min;
+        self.clip_y_max = max.min(self.height);
+    }
+
+    /// Remove clip — draw to full canvas
+    pub fn clear_clip_y(&mut self) {
+        self.clip_y_min = 0;
+        self.clip_y_max = self.height;
+    }
+
     pub fn adjust_zoom(&mut self, steps: ScalarF4E4) {
         let steps_i = steps.to_isize();
         let step_count = steps_i.unsigned_abs() as usize;
         let is_zoom_in = steps_i > 0;
         let mut factor = ScalarF4E4::ONE;
-        let zoom_in_ratio = ScalarF4E4::from(33) / ScalarF4E4::from(32);
-        let zoom_out_ratio = ScalarF4E4::from(32) / ScalarF4E4::from(33);
+        let zoom_in_ratio = ScalarF4E4::from(33) / 32;
+        let zoom_out_ratio = ScalarF4E4::from(32) / 33;
         for _ in 0..step_count {
             factor = if is_zoom_in { factor * zoom_in_ratio } else { factor * zoom_out_ratio };
         }
@@ -58,7 +82,7 @@ impl RuCoords {
     }
 
     #[inline] pub fn ru_to_px_x(&self, x: ScalarF4E4) -> isize { (self.half_dims.r() + x * self.span * self.ru).to_isize() }
-    #[inline] pub fn ru_to_px_y(&self, y: ScalarF4E4) -> isize { (self.half_dims.i() + y * self.span * self.ru).to_isize() }
+    #[inline] pub fn ru_to_px_y(&self, y: ScalarF4E4) -> isize { (self.half_dims.i() + (y - self.scroll_y) * self.span * self.ru).to_isize() }
     #[inline] pub fn ru_to_px_w(&self, w: ScalarF4E4) -> isize { (w * self.span * self.ru).to_isize() }
     #[inline] pub fn ru_to_px_h(&self, h: ScalarF4E4) -> isize { (h * self.span * self.ru).to_isize() }
 }

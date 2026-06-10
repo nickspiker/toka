@@ -132,7 +132,7 @@ mod tests {
         bytecode.extend(VsfType::u3(42).flatten());
 
         bytecode.extend(VsfType::op(b'p', b's').flatten());
-        bytecode.extend(VsfType::l("hello".to_string()).flatten());
+        bytecode.extend(VsfType::a("hello".to_string()).flatten());
 
         bytecode.extend(VsfType::op(b'h', b'l').flatten());
 
@@ -141,6 +141,6 @@ mod tests {
 
         assert_eq!(instructions.len(), 5);
         matches!(instructions[1], Instruction::Value(VsfType::u3(42)));
-        matches!(instructions[3], Instruction::Value(VsfType::l(_)));
+        matches!(instructions[3], Instruction::Value(VsfType::a(_)));
     }
 }
