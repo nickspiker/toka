@@ -1,6 +1,6 @@
 // NTSC B&W composite framebuffer display
 // Pixel clock: 25 MHz, 1-bit framebuffer in BRAM
-// Output: 2-pin DAC (sync + video) through resistor network
+// Output: 2-pin DAC (sync + video) thru resistor network
 //
 // Stores 3 bitmaps (RUN/PASS/FAIL) in one ROM, selected by status input.
 // DSP-free address math (shift-add for ×40).

@@ -303,7 +303,7 @@ All drawing uses **Relative Units** - a resolution-independent coordinate system
 **Core Concept:**
 ```rust
 span = 2wh / (w+h)  // Harmonic mean of width and height
-1 RU = span pixels  // Base unit scales smoothly through aspect ratios
+1 RU = span pixels  // Base unit scales smoothly thru aspect ratios
 ru_multiplier       // User zoom (default 1, range 0.125-8)
 ```
 
@@ -615,7 +615,7 @@ cargo test --lib builder
 - Signature verifies behavior (not just bits)
 - No fingerprinting attacks (no platform leaks)
 
-### Security Through Simplicity
+### Security Thru Simplicity
 
 **Less mechanism = less attack surface:**
 - No linear memory → no buffer overflows
@@ -629,7 +629,7 @@ cargo test --lib builder
 - Revocable (handle invalidation)
 - No ambient authority (must be explicitly granted)
 
-### Performance Through Design
+### Performance Thru Design
 
 **Not "fast despite safety" but "fast because of safety":**
 - Spirix has fewer branches than IEEE (no denormal checks)

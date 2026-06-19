@@ -20,6 +20,7 @@ path = "src/main.rs"
 # Core dependencies for deterministic computation
 spirix = "0.0.12"
 fontdue = { package = "fontdue-spirix", path = "../fontdue-spirix", default-features = false, optional = true }
+fluor = { path = "../fluor", optional = true }
 blake3 = "1"
 vsf = { version = "0.8", default-features = false, features = ["spirix", "crypto", "inspect", "handle"] }
 bytemuck = "1.14"
@@ -51,4 +52,4 @@ harness = false
 [features]
 default = ["console_error_panic_hook", "runtime"]
 console_error_panic_hook = ["dep:console_error_panic_hook"]
-runtime = ["dep:fontdue"]
+runtime = ["dep:fontdue", "dep:fluor"]
