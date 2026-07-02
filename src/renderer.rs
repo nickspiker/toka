@@ -174,9 +174,11 @@ impl RenderContext {
     }
 }
 
-/// Extract a VSF colour as packed u32 sRGB for CanvasFast
+/// Extract a VSF colour as a fluor-native α+darkness pixel (`0xααRRGGBB`, RGB = 255−visible).
 ///
-/// Pipeline: VSF colour → linear sRGB → sRGB OETF → u8 → R<<24|G<<16|B<<8|A
+/// Pipeline: VSF colour → linear sRGB → sRGB OETF → u8 → `pack_argb` (flips to darkness).
+/// This is the single colour funnel for the whole renderer; every primitive draws with the
+/// value it returns, so the format lives in exactly one place.
 pub fn extract_colour_u32(vsf: &VsfType) -> Result<u32, String> {
     let (r, g, b) = vsf
         .to_srgb_u8_s44()
@@ -192,8 +194,8 @@ pub fn extract_colour_u32(vsf: &VsfType) -> Result<u32, String> {
         _ => 255,
     };
 
-    let packed = ((r as u32) << 24) | ((g as u32) << 16) | ((b as u32) << 8) | (a as u32);
-    Ok(packed)
+    // fluor α+darkness: α in the high byte, RGB stored as darkness (255 − channel).
+    Ok(fluor::paint::pack_argb(r, g, b, a))
 }
 
 #[cfg(test)]
@@ -203,30 +205,19 @@ mod tests {
 
     #[test]
     fn test_colour_extraction() {
+        // α+darkness: α in high byte; RGB bytes are darkness (255 − visible).
         let black = extract_colour_u32(&VsfType::rck).unwrap();
-        println!("rck  → {:08X}  (a={})", black, black & 0xFF);
+        assert_eq!(black >> 24, 255, "black alpha (high byte)");
 
         let blue = extract_colour_u32(&VsfType::rcb).unwrap();
-        println!("rcb  → {:08X}  (a={})", blue, blue & 0xFF);
+        assert_eq!(blue >> 24, 255, "blue alpha (high byte)");
+        // sRGB OETF rounds 255→254, so a "fully bright" channel reads darkness ≤1, not exactly 0.
+        assert!(blue & 0xFF <= 1, "blue: B nearly zero darkness, got {}", blue & 0xFF);
 
         let red_half = extract_colour_u32(&VsfType::ra([255, 0, 0, 127])).unwrap();
-        println!("ra[255,0,0,127] → {:08X}  (a={})", red_half, red_half & 0xFF);
-
-        assert_eq!(black & 0xFF, 255, "black alpha");
-        assert_eq!(blue  & 0xFF, 255, "blue alpha");
-        assert_eq!(red_half & 0xFF, 127, "red half alpha");
+        assert_eq!(red_half >> 24, 127, "red half alpha (high byte)");
+        assert!((red_half >> 16) & 0xFF <= 1, "red: R nearly zero darkness, got {}", (red_half >> 16) & 0xFF);
     }
-}
-
-/// Extract a VSF colour as linear S44 RGBA for CanvasQuality
-///
-/// Pipeline: VSF colour → linear RGBA S44 [R, G, B, A]
-/// Gamma-2 OETF is applied later at to_rgba_bytes(), not here.
-pub fn extract_colour_linear(vsf: &VsfType) -> Result<crate::drawing::Pixel, String> {
-    let rgba = vsf
-        .to_rgba_linear_s44()
-        .ok_or_else(|| format!("Not a colour type: {:?}", vsf))?;
-    Ok([rgba.r, rgba.g, rgba.b, rgba.a])
 }
 
 #[cfg(test)]

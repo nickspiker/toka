@@ -1,262 +1,299 @@
-//! Drawing primitives for Toka canvas
+//! Drawing layer — single fluor-backed pipeline.
 //!
-//! Two pipeline variants:
-//! - **Fast** (`CanvasFast`): packed u32 sRGB, colours pre-converted at build time,
-//!   blending via SIMD-in-register u64, zero-copy output. Default pipeline.
-//! - **Quality** (`CanvasQuality`): linear S44 RGBA, Porter-Duff compositing in
-//!   linear light, gamma-2 OETF + error diffusion at output.
+//! `Canvas` owns an α+darkness pixel buffer (`0xααRRGGBB`, RGB = 255−visible) and draws into it
+//! with fluor's paint primitives + `TextRenderer`. The old dual Fast(sRGB)/Quality(linear) pipelines
+//! and their bespoke rasterizers are gone; fluor is the one compositor.
 //!
-//! Shared:
-//! - [`shared`] - RU coordinate system (span, zoom, px conversions)
+//! **Compositing direction.** fluor paints *front-to-back* (`under` blend: new content goes behind
+//! what's already there, opaque pixels early-out). toka emits *back-to-front* (painter's: clear an
+//! opaque background, then draw over it). To bridge, every primitive rasterizes into a transparent
+//! `scratch` buffer first (fluor AA onto empty), then [`Canvas::blit_scratch`] composites scratch
+//! *over* the main buffer (`scratch.under(main)` — new in front), so later draws land on top.
 //!
-//! Fast pipeline:
-//! - [`canvas_fast`] - CanvasFast struct and pixel ops
-//! - [`rect_fast`] - Rectangle rasterization (SDF, all rotations)
-//! - [`circle_fast`] - Circle rasterization
-//! - [`text_fast`] - Text rendering (placeholder)
-//!
-//! Quality pipeline:
-//! - [`canvas_quality`] - CanvasQuality struct and pixel ops
-//! - [`rect_quality`] - Rectangle rasterization
-//! - [`circle_quality`] - Circle rasterization
-//! - [`text_quality`] - Text rendering (placeholder)
+//! Coordinates: RU math stays in [`shared::RuCoords`] (spirix, center-origin, harmonic-mean span);
+//! each primitive converts to f32 pixel space at the fluor boundary via the `ru_to_px_*f` helpers.
+//! Colour funnels through [`crate::renderer::extract_colour_u32`] → fluor α+darkness. Output flips
+//! back to visible RGBA in [`Canvas::to_rgba_bytes`].
 
 pub mod shared;
 
-pub mod canvas_fast;
-pub mod rect_fast;
-pub mod circle_fast;
-pub mod text_fast;
-pub mod line_fast;
-
-pub mod canvas_quality;
-pub mod pixel_quality;
-pub mod rect_quality;
-pub mod circle_quality;
-pub mod text_quality;
-pub mod line_quality;
-
-pub use canvas_fast::CanvasFast;
-pub use canvas_quality::{CanvasQuality, Pixel};
-pub use shared::{BlendMode, TextSettings, LineSettings, TableSettings};
+pub use shared::RuCoords;
+pub use shared::{BlendMode, LineSettings, TableSettings, TextSettings};
 
 use crate::vm::FontCache;
+use shared::RuCoords as Coords;
 use spirix::{CircleF4E4, ScalarF4E4};
+use std::collections::HashMap;
 
-/// Runtime-selectable canvas — both pipelines compiled in, toggled at runtime.
-pub enum Canvas {
-    /// Fast u32 sRGB pipeline — pre-gamma, SIMD-in-register blending
-    Fast(CanvasFast),
-    /// Quality linear S44 RGBA pipeline — Porter-Duff, gamma-2 OETF at output
-    Quality(CanvasQuality),
+use fluor::canvas::{Canvas as FCanvas, Damage, PixelRect};
+use fluor::paint::{self, Clip};
+use fluor::pixel::Blend;
+use fluor::text::TextRenderer;
+
+/// Opaque black in α+darkness (α=255, darkness=255 → visible black). The default surface fill.
+const OPAQUE_BLACK: u32 = 0xFFFF_FFFF;
+
+/// Single fluor-backed canvas.
+pub struct Canvas {
+    coords: Coords,
+    /// α+darkness pixel buffer (the composited result).
+    pixels: Vec<u32>,
+    /// Transparent scratch each primitive rasterizes into before being composited over `pixels`.
+    /// Kept at zero between draws (blit resets the touched region), so it never needs a full clear.
+    scratch: Vec<u32>,
+    /// fluor text engine (owns its cosmic-text font system + glyph cache).
+    text: TextRenderer,
+    /// Capsule-shipped fonts: `font_key` → registered family name in fluor's font DB.
+    fonts: HashMap<[u8; 32], String>,
+}
+
+/// Map toka's blend-mode enum onto fluor's smaller set; anything without a fluor equivalent
+/// falls back to Normal (source-over).
+fn to_fluor_blend(mode: BlendMode) -> fluor::BlendMode {
+    use fluor::BlendMode as F;
+    match mode {
+        BlendMode::Multiply => F::Multiply,
+        BlendMode::Screen => F::Screen,
+        BlendMode::Overlay => F::Overlay,
+        BlendMode::Darken => F::Darken,
+        BlendMode::Lighten => F::Lighten,
+        BlendMode::Add => F::Add,
+        BlendMode::Subtract => F::Subtract,
+        _ => F::Normal,
+    }
 }
 
 #[allow(missing_docs)]
 impl Canvas {
-    /// Create a fast (u32 sRGB) canvas
     pub fn new_fast(width: usize, height: usize) -> Self {
-        Canvas::Fast(CanvasFast::new(width, height))
+        Self {
+            coords: Coords::new(width, height),
+            pixels: vec![OPAQUE_BLACK; width * height],
+            scratch: vec![0u32; width * height],
+            text: TextRenderer::new(),
+            fonts: HashMap::new(),
+        }
     }
 
-    /// Create a quality (linear S44 RGBA) canvas
+    /// One pipeline now — kept as an alias so callers that asked for "quality" still work.
     pub fn new_quality(width: usize, height: usize) -> Self {
-        Canvas::Quality(CanvasQuality::new(width, height))
+        Self::new_fast(width, height)
     }
 
-    /// Pipeline name: "fast" or "quality"
     pub fn pipeline_name(&self) -> &'static str {
-        match self {
-            Canvas::Fast(_) => "fast",
-            Canvas::Quality(_) => "quality",
+        "fluor"
+    }
+
+    // ── Coordinate / state accessors (delegate to RuCoords) ──────────────
+
+    pub fn span(&self) -> ScalarF4E4 { self.coords.span() }
+    pub fn ru(&self) -> ScalarF4E4 { self.coords.ru() }
+    pub fn width(&self) -> usize { self.coords.width() }
+    pub fn height(&self) -> usize { self.coords.height() }
+    pub fn dimensions(&self) -> (usize, usize) { (self.coords.width(), self.coords.height()) }
+    pub fn half_dims(&self) -> CircleF4E4 { self.coords.half_dims() }
+    pub fn ru_to_px_x(&self, x: ScalarF4E4) -> usize { self.coords.ru_to_px_x(x).max(0) as usize }
+    pub fn ru_to_px_y(&self, y: ScalarF4E4) -> usize { self.coords.ru_to_px_y(y).max(0) as usize }
+    pub fn set_ru(&mut self, ru: ScalarF4E4) { self.coords.set_ru(ru); }
+    pub fn set_scroll_y(&mut self, scroll_y: ScalarF4E4) { self.coords.set_scroll_y(scroll_y); }
+    pub fn set_clip_y(&mut self, min: usize, max: usize) { self.coords.set_clip_y(min, max); }
+    pub fn clear_clip_y(&mut self) { self.coords.clear_clip_y(); }
+    pub fn adjust_zoom(&mut self, steps: ScalarF4E4) { self.coords.adjust_zoom(steps); }
+
+    /// Clip rect for the current clip_y band, or `None` if unclipped (full canvas).
+    fn clip(&self) -> Option<Clip> {
+        if self.coords.clip_y_min == 0 && self.coords.clip_y_max >= self.coords.height {
+            None
+        } else {
+            Some(Clip::new(0, self.coords.clip_y_min, self.coords.width, self.coords.clip_y_max))
         }
     }
 
-    pub fn span(&self) -> ScalarF4E4 {
-        match self {
-            Canvas::Fast(c) => c.span(),
-            Canvas::Quality(c) => c.span(),
+    /// Composite the scratch buffer *over* `pixels` within `bb` (painter's order — scratch is the
+    /// new content, in front), then reset the touched scratch pixels back to transparent.
+    fn blit_scratch(&mut self, bb: PixelRect) {
+        if bb.is_empty() { return; }
+        let w = self.coords.width;
+        let h = self.coords.height;
+        let x0 = bb.x0.min(w);
+        let x1 = bb.x1.min(w);
+        let y0 = bb.y0.min(h);
+        let y1 = bb.y1.min(h);
+        for y in y0..y1 {
+            let row = y * w;
+            for x in x0..x1 {
+                let i = row + x;
+                let s = self.scratch[i];
+                if s >> 24 != 0 {
+                    self.pixels[i] = s.under(self.pixels[i], fluor::BlendMode::Normal);
+                    self.scratch[i] = 0;
+                }
+            }
         }
     }
 
-    pub fn ru(&self) -> ScalarF4E4 {
-        match self {
-            Canvas::Fast(c) => c.ru(),
-            Canvas::Quality(c) => c.ru(),
+    /// Rasterize one primitive into the transparent scratch buffer via `f`, then composite it over
+    /// the main buffer. `f` receives a fluor canvas backed by `scratch`.
+    fn paint_over(&mut self, f: impl FnOnce(&mut FCanvas)) {
+        let (w, h) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        {
+            let mut fc = FCanvas::new(&mut self.scratch, w, h, &mut dmg);
+            f(&mut fc);
         }
-    }
-
-    pub fn ru_to_px_x(&self, x: ScalarF4E4) -> usize {
-        match self {
-            Canvas::Fast(c) => c.ru_to_px_x(x).max(0) as usize,
-            Canvas::Quality(c) => c.ru_to_px_x(x).max(0) as usize,
-        }
-    }
-
-    pub fn ru_to_px_y(&self, y: ScalarF4E4) -> usize {
-        match self {
-            Canvas::Fast(c) => c.ru_to_px_y(y).max(0) as usize,
-            Canvas::Quality(c) => c.ru_to_px_y(y).max(0) as usize,
-        }
-    }
-
-    pub fn set_ru(&mut self, ru: ScalarF4E4) {
-        match self {
-            Canvas::Fast(c) => c.set_ru(ru),
-            Canvas::Quality(c) => c.set_ru(ru),
-        }
-    }
-
-    pub fn set_scroll_y(&mut self, scroll_y: ScalarF4E4) {
-        match self {
-            Canvas::Fast(c) => c.coords.set_scroll_y(scroll_y),
-            Canvas::Quality(c) => c.set_scroll_y(scroll_y),
-        }
-    }
-
-    pub fn set_clip_y(&mut self, min: usize, max: usize) {
-        match self {
-            Canvas::Fast(c) => c.coords.set_clip_y(min, max),
-            Canvas::Quality(c) => { c.set_clip_y(min, max); }
-        }
-    }
-
-    pub fn clear_clip_y(&mut self) {
-        match self {
-            Canvas::Fast(c) => c.coords.clear_clip_y(),
-            Canvas::Quality(c) => { c.clear_clip_y(); }
-        }
-    }
-
-    pub fn adjust_zoom(&mut self, steps: ScalarF4E4) {
-        match self {
-            Canvas::Fast(c) => c.adjust_zoom(steps),
-            Canvas::Quality(c) => c.adjust_zoom(steps),
-        }
-    }
-
-    pub fn width(&self) -> usize {
-        match self {
-            Canvas::Fast(c) => c.width(),
-            Canvas::Quality(c) => c.width(),
-        }
-    }
-
-    pub fn height(&self) -> usize {
-        match self {
-            Canvas::Fast(c) => c.height(),
-            Canvas::Quality(c) => c.height(),
-        }
-    }
-
-    pub fn dimensions(&self) -> (usize, usize) {
-        match self {
-            Canvas::Fast(c) => c.dimensions(),
-            Canvas::Quality(c) => c.dimensions(),
-        }
-    }
-
-    pub fn half_dims(&self) -> CircleF4E4 {
-        match self {
-            Canvas::Fast(c) => c.half_dims(),
-            Canvas::Quality(c) => c.half_dims(),
-        }
+        self.blit_scratch(dmg.bbox());
     }
 
     pub fn clear(&mut self, colour: &vsf::VsfType) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => c.clear(colour),
-            Canvas::Quality(c) => c.clear(colour),
-        }
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let w = self.coords.width;
+        let y0 = self.coords.clip_y_min;
+        let y1 = self.coords.clip_y_max;
+        self.pixels[y0 * w..y1 * w].fill(c);
+        Ok(())
     }
 
-    /// Shift pixel buffer by delta_y rows. Exposed strip filled with bg colour.
-    pub fn scroll_pixels(&mut self, delta_y: isize, bg: u32) {
-        match self {
-            Canvas::Fast(c) => c.scroll_pixels(delta_y, bg),
-            Canvas::Quality(_c) => {} // TODO: quality pipeline scroll
-        }
-    }
-
-    /// Convert canvas pixels to RGBA bytes for browser ImageData
+    /// Convert α+darkness buffer → visible RGBA bytes for browser ImageData.
+    /// `pixel ^ 0x00FFFFFF` flips darkness→visible RGB; the surface is forced opaque.
     pub fn to_rgba_bytes(&self) -> Vec<u8> {
-        match self {
-            Canvas::Fast(c) => c.to_rgba_bytes(),
-            Canvas::Quality(c) => c.to_rgba_bytes(),
+        let mut bytes = Vec::with_capacity(self.pixels.len() * 4);
+        for &p in &self.pixels {
+            let v = p ^ 0x00FF_FFFF;
+            bytes.push((v >> 16) as u8); // R
+            bytes.push((v >> 8) as u8); // G
+            bytes.push(v as u8); // B
+            bytes.push(0xFF); // A — opaque output surface
         }
+        bytes
     }
+
+    // ── Geometry primitives (fluor paint into scratch, composited over) ──
 
     pub fn fill_rect_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, colour: &vsf::VsfType) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => {
-                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.fill_rect_ru(pos, size, u32_colour);
-                Ok(())
-            }
-            Canvas::Quality(c) => {
-                let pixel = crate::renderer::extract_colour_linear(colour)?;
-                c.fill_rect_ru(pos, size, pixel);
-                Ok(())
-            }
-        }
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let cx = self.coords.ru_to_px_xf(pos.r());
+        let cy = self.coords.ru_to_px_yf(pos.i());
+        let w = self.coords.ru_to_px_wf(size.r());
+        let h = self.coords.ru_to_px_hf(size.i());
+        let clip = self.clip();
+        self.paint_over(|fc| paint::draw_rect(fc, cx, cy, w, h, c, clip));
+        Ok(())
     }
 
-    /// Draw a 1px horizontal line (no AA — fast path)
+    /// 1px horizontal line at RU `y` from `x0` to `x1` — a zero-height rect (fluor's line convention).
+    /// Centre on the pixel row for a crisp rule (`+0.5` = pixel centre).
     pub fn hline_ru(&mut self, y: ScalarF4E4, x0: ScalarF4E4, x1: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => {
-                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.hline_ru(y, x0, x1, u32_colour);
-                Ok(())
-            }
-            Canvas::Quality(_c) => Ok(()),
-        }
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let py = self.coords.ru_to_px_yf(y).floor() + 0.5;
+        let px0 = self.coords.ru_to_px_xf(x0);
+        let px1 = self.coords.ru_to_px_xf(x1);
+        let cx = (px0 + px1) * 0.5;
+        let w = (px1 - px0).abs();
+        let clip = self.clip();
+        self.paint_over(|fc| paint::draw_rect(fc, cx, py, w, 0.0, c, clip));
+        Ok(())
     }
 
-    /// Draw a 1px vertical line (no AA — fast path)
+    /// 1px vertical line at RU `x` from `y0` to `y1` — a zero-width rect.
     pub fn vline_ru(&mut self, x: ScalarF4E4, y0: ScalarF4E4, y1: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => {
-                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.vline_ru(x, y0, y1, u32_colour);
-                Ok(())
-            }
-            Canvas::Quality(_c) => Ok(()),
-        }
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let px = self.coords.ru_to_px_xf(x).floor() + 0.5;
+        let py0 = self.coords.ru_to_px_yf(y0);
+        let py1 = self.coords.ru_to_px_yf(y1);
+        let cy = (py0 + py1) * 0.5;
+        let h = (py1 - py0).abs();
+        let clip = self.clip();
+        self.paint_over(|fc| paint::draw_rect(fc, px, cy, 0.0, h, c, clip));
+        Ok(())
     }
 
-    /// Draw a 1px axis-aligned rectangle outline (no AA — fast path for borders)
+    /// 1px axis-aligned rectangle outline (borders).
     pub fn stroke_rect_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, colour: &vsf::VsfType) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => {
-                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.stroke_rect_ru(pos, size, u32_colour);
-                Ok(())
-            }
-            Canvas::Quality(_c) => {
-                // TODO: quality path for stroke_rect_ru
-                Ok(())
-            }
-        }
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let cx = self.coords.ru_to_px_xf(pos.r());
+        let cy = self.coords.ru_to_px_yf(pos.i());
+        let w = self.coords.ru_to_px_wf(size.r());
+        let h = self.coords.ru_to_px_hf(size.i());
+        let x = (cx - w * 0.5).round() as isize;
+        let yy = (cy - h * 0.5).round() as isize;
+        let (rw, rh) = (w.round() as isize, h.round() as isize);
+        let clip = self.clip();
+        self.paint_over(|fc| paint::stroke_rect(fc, x, yy, rw, rh, 1, c, clip, None));
+        Ok(())
     }
 
     pub fn fill_rotated_rect_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, angle: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => {
-                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.fill_rotated_rect_ru(pos, size, angle, u32_colour);
-                Ok(())
-            }
-            Canvas::Quality(c) => {
-                let pixel = crate::renderer::extract_colour_linear(colour)?;
-                c.fill_rotated_rect_ru(pos, size, angle, pixel);
-                Ok(())
-            }
-        }
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let cx = self.coords.ru_to_px_xf(pos.r());
+        let cy = self.coords.ru_to_px_yf(pos.i());
+        let w = self.coords.ru_to_px_wf(size.r());
+        let h = self.coords.ru_to_px_hf(size.i());
+        let ang = angle.to_f64() as f32;
+        let clip = self.clip();
+        self.paint_over(|fc| paint::draw_rect_rotated(fc, cx, cy, w, h, ang, c, clip));
+        Ok(())
     }
 
+    pub fn fill_circle(&mut self, center: CircleF4E4, radius: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let cx = self.coords.ru_to_px_xf(center.r());
+        let cy = self.coords.ru_to_px_yf(center.i());
+        let r = self.coords.ru_to_px_wf(radius);
+        let clip = self.clip();
+        self.paint_over(|fc| paint::draw_circle(fc, cx, cy, r, c, clip));
+        Ok(())
+    }
+
+    pub fn fill_ellipse(&mut self, center: CircleF4E4, radii: CircleF4E4, colour: &vsf::VsfType) -> Result<(), String> {
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let cx = self.coords.ru_to_px_xf(center.r());
+        let cy = self.coords.ru_to_px_yf(center.i());
+        let rx = self.coords.ru_to_px_wf(radii.r());
+        let ry = self.coords.ru_to_px_hf(radii.i());
+        let clip = self.clip();
+        self.paint_over(|fc| paint::draw_ellipse(fc, cx, cy, rx, ry, c, clip));
+        Ok(())
+    }
+
+    /// Ellipse outline. fluor has no stroke-ellipse primitive; approximate the ring as an outer
+    /// filled ellipse (the VSF renderer currently rejects strokes upstream, so this path is
+    /// effectively unused — kept faithful to the API surface).
+    pub fn stroke_ellipse(&mut self, center: CircleF4E4, radii: CircleF4E4, _stroke_width: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let cx = self.coords.ru_to_px_xf(center.r());
+        let cy = self.coords.ru_to_px_yf(center.i());
+        let rx = self.coords.ru_to_px_wf(radii.r());
+        let ry = self.coords.ru_to_px_hf(radii.i());
+        let clip = self.clip();
+        self.paint_over(|fc| paint::draw_ellipse(fc, cx, cy, rx, ry, c, clip));
+        Ok(())
+    }
+
+    /// General line via a thin rotated rect (fluor has no line primitive; a rotated rect is it).
+    pub fn draw_line(&mut self, start: CircleF4E4, end: CircleF4E4, colour: &vsf::VsfType, settings: &LineSettings) -> Result<(), String> {
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let x0 = self.coords.ru_to_px_xf(start.r());
+        let y0 = self.coords.ru_to_px_yf(start.i());
+        let x1 = self.coords.ru_to_px_xf(end.r());
+        let y1 = self.coords.ru_to_px_yf(end.i());
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = (dx * dx + dy * dy).sqrt();
+        let ang = dy.atan2(dx);
+        let weight = settings.weight.map(|w| self.coords.ru_to_px_wf(w)).unwrap_or(1.0).max(1.0);
+        let cx = (x0 + x1) * 0.5;
+        let cy = (y0 + y1) * 0.5;
+        let clip = self.clip();
+        self.paint_over(|fc| paint::draw_rect_rotated(fc, cx, cy, len, weight, ang, c, clip));
+        Ok(())
+    }
+
+    // ── Text (fluor TextRenderer) ────────────────────────────────────────
+
+    #[allow(clippy::too_many_arguments)]
     pub fn draw_text(
         &mut self,
-        font_cache: &mut FontCache,
+        _font_cache: &mut FontCache,
         font_key: [u8; 32],
         font_bytes: &[u8],
         pos: CircleF4E4,
@@ -265,287 +302,238 @@ impl Canvas {
         colour: &vsf::VsfType,
         settings: &TextSettings,
     ) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => {
-                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.draw_text(font_cache, font_key, font_bytes, pos, size, text, u32_colour, settings);
-                Ok(())
+        let c = crate::renderer::extract_colour_u32(colour)?;
+        let cx = self.coords.ru_to_px_xf(pos.r());
+        let cy = self.coords.ru_to_px_yf(pos.i());
+        let px = self.coords.ru_to_px_hf(size);
+        let weight = settings.weight.map(|w| w.to_i32().clamp(1, 1000) as u16).unwrap_or(400);
+
+        // Resolve (and lazily register) the capsule's shipped font family.
+        let family = match self.fonts.get(&font_key) {
+            Some(f) => f.clone(),
+            None => {
+                let name = self
+                    .text
+                    .load_font_data_named(font_bytes.to_vec())
+                    .unwrap_or_else(|| "Open Sans".to_string());
+                self.fonts.insert(font_key, name.clone());
+                name
             }
-            Canvas::Quality(c) => {
-                let pixel = crate::renderer::extract_colour_linear(colour)?;
-                c.draw_text(font_cache, font_key, font_bytes, pos, size, text, pixel, settings);
-                Ok(())
+        };
+
+        let clip = self.clip();
+        let (w, h) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        {
+            // Split borrows: `text` and `scratch` are disjoint fields; rasterize into scratch.
+            let Canvas { text: engine, scratch, .. } = self;
+            let mut fc = FCanvas::new(scratch, w, h, &mut dmg);
+            match settings.align {
+                1 => { engine.draw_text_left_u32(&mut fc, text, cx, cy, px, weight, c, &family, clip, None, None); }
+                2 => { engine.draw_text_right_u32(&mut fc, text, cx, cy, px, weight, c, &family, clip, None, None); }
+                _ => { engine.draw_text_center_u32(&mut fc, text, cx, cy, px, weight, c, &family, clip, None, None); }
             }
+        }
+        self.blit_scratch(dmg.bbox());
+        Ok(())
+    }
+
+    // ── Scroll / layers / regions ────────────────────────────────────────
+
+    /// Shift the buffer by `delta_y` rows; the exposed strip is filled with `bg` (α+darkness).
+    pub fn scroll_pixels(&mut self, delta_y: isize, bg: u32) {
+        let h = self.coords.height;
+        let w = self.coords.width;
+        let d = delta_y.unsigned_abs().min(h);
+        if d == 0 { return; }
+        if d >= h { self.pixels.fill(bg); return; }
+        if delta_y > 0 {
+            self.pixels.copy_within(d * w..h * w, 0);
+            self.pixels[((h - d) * w)..].fill(bg);
+        } else {
+            self.pixels.copy_within(0..(h - d) * w, d * w);
+            self.pixels[..d * w].fill(bg);
         }
     }
 
-    pub fn draw_line(
-        &mut self,
-        start: CircleF4E4,
-        end: CircleF4E4,
-        colour: &vsf::VsfType,
-        settings: &LineSettings,
-    ) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => {
-                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.draw_line(start, end, u32_colour, settings);
-                Ok(())
-            }
-            Canvas::Quality(c) => {
-                let pixel = crate::renderer::extract_colour_linear(colour)?;
-                c.draw_line(start, end, pixel, settings);
-                Ok(())
-            }
-        }
-    }
-
-    pub fn fill_circle(&mut self, center: CircleF4E4, radius: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => {
-                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.fill_circle(center, radius, u32_colour);
-                Ok(())
-            }
-            Canvas::Quality(c) => {
-                let pixel = crate::renderer::extract_colour_linear(colour)?;
-                c.fill_circle(center, radius, pixel);
-                Ok(())
-            }
-        }
-    }
-
-    pub fn fill_ellipse(&mut self, center: CircleF4E4, radii: CircleF4E4, colour: &vsf::VsfType) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => {
-                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.fill_ellipse(center, radii, u32_colour);
-                Ok(())
-            }
-            Canvas::Quality(c) => {
-                let pixel = crate::renderer::extract_colour_linear(colour)?;
-                c.fill_ellipse(center, radii, pixel);
-                Ok(())
-            }
-        }
-    }
-
-    pub fn stroke_ellipse(
-        &mut self,
-        center: CircleF4E4,
-        radii: CircleF4E4,
-        stroke_width: ScalarF4E4,
-        colour: &vsf::VsfType,
-    ) -> Result<(), String> {
-        match self {
-            Canvas::Fast(c) => {
-                let u32_colour = crate::renderer::extract_colour_u32(colour)?;
-                c.stroke_ellipse(center, radii, stroke_width, u32_colour);
-                Ok(())
-            }
-            Canvas::Quality(c) => {
-                let pixel = crate::renderer::extract_colour_linear(colour)?;
-                c.stroke_ellipse(center, radii, stroke_width, pixel);
-                Ok(())
-            }
-        }
-    }
-
-    /// Create a transparent layer canvas matching this canvas's pipeline and dimensions.
+    /// Transparent layer matching this canvas's dimensions + RU state (for opacity groups).
     pub fn new_layer(&self) -> Canvas {
-        match self {
-            Canvas::Fast(c) => Canvas::Fast(CanvasFast::new_layer(c.width(), c.height(), &c.coords)),
-            Canvas::Quality(c) => {
-                let mut layer = CanvasQuality::new_layer(c.width(), c.height(), c.ru());
-                layer.set_scroll_y(c.scroll_y());
-                Canvas::Quality(layer)
-            }
+        let mut coords = Coords::new(self.coords.width, self.coords.height);
+        coords.set_ru(self.coords.ru());
+        coords.set_scroll_y(self.coords.scroll_y);
+        Canvas {
+            coords,
+            pixels: vec![0u32; self.coords.width * self.coords.height], // fully transparent
+            scratch: vec![0u32; self.coords.width * self.coords.height],
+            text: TextRenderer::new(),
+            fonts: HashMap::new(),
         }
     }
 
-    /// Composite a layer onto this canvas with opacity and blend mode.
-    ///
-    /// Fast path: if opacity is 1.0 and mode is Normal, this is a no-op
-    /// (caller should have rendered directly into self instead).
+    /// Composite `layer` on top of self with opacity + blend mode (α+darkness under-blend).
     pub fn composite_layer(&mut self, layer: &Canvas, opacity: ScalarF4E4, mode: BlendMode) {
-        match (self, layer) {
-            (Canvas::Fast(dst), Canvas::Fast(src)) => {
-                let a = (opacity * 255i32).to_isize().clamp(0, 255) as u8;
-                dst.composite_from(src, a, mode);
-            }
-            (Canvas::Quality(dst), Canvas::Quality(src)) => {
-                dst.composite_from(src, opacity, mode);
-            }
-            _ => {} // mismatched pipelines — silently skip
+        let op = (opacity * 255i32).to_i32().clamp(0, 255) as u32;
+        if op == 0 { return; }
+        let fmode = to_fluor_blend(mode);
+        let n = self.pixels.len().min(layer.pixels.len());
+        for i in 0..n {
+            let s = layer.pixels[i];
+            let sa = s >> 24;
+            if sa == 0 { continue; } // transparent source pixel
+            let scaled_a = (sa * op / 255) & 0xFF;
+            let top = (scaled_a << 24) | (s & 0x00FF_FFFF);
+            // layer sits on top; base is underneath → top.under(base)
+            self.pixels[i] = top.under(self.pixels[i], fmode);
         }
     }
 
-    /// Returns true if the given opacity + blend mode would be a passthrough
-    /// (no temp layer needed — render children directly).
     pub fn is_layer_passthrough(opacity: ScalarF4E4, mode: BlendMode) -> bool {
         mode.is_passthrough() && opacity >= ScalarF4E4::ONE
     }
 
-    /// Save a rectangular pixel region (for differential rerender).
-    /// Returns (pixels, px_x, px_y, px_w, px_h) in pixel coords.
+    /// Save a rectangular pixel region (differential rerender). Format-agnostic raw copy.
     pub fn save_region_ru(&self, pos: CircleF4E4, size: CircleF4E4) -> (Vec<u32>, usize, usize, usize, usize) {
-        match self {
-            Canvas::Fast(c) => {
-                let half_w = size.r() >> 1usize;
-                let half_h = size.i() >> 1usize;
-                let left = c.coords.ru_to_px_x(pos.r() - half_w).max(0) as usize;
-                let top = c.coords.ru_to_px_y(pos.i() - half_h).max(0) as usize;
-                let right = (c.coords.ru_to_px_x(pos.r() + half_w).max(0) as usize).min(c.coords.width);
-                let bottom = (c.coords.ru_to_px_y(pos.i() + half_h).max(0) as usize).min(c.coords.height);
-                let w = right.saturating_sub(left);
-                let h = bottom.saturating_sub(top);
-                let mut pixels = Vec::with_capacity(w * h);
-                for row in top..bottom {
-                    let start = row * c.coords.width + left;
-                    pixels.extend_from_slice(&c.pixels[start..start + w]);
-                }
-                (pixels, left, top, w, h)
-            }
-            Canvas::Quality(_) => (Vec::new(), 0, 0, 0, 0), // TODO
+        let half_w = size.r() >> 1usize;
+        let half_h = size.i() >> 1usize;
+        let left = self.coords.ru_to_px_x(pos.r() - half_w).max(0) as usize;
+        let top = self.coords.ru_to_px_y(pos.i() - half_h).max(0) as usize;
+        let right = (self.coords.ru_to_px_x(pos.r() + half_w).max(0) as usize).min(self.coords.width);
+        let bottom = (self.coords.ru_to_px_y(pos.i() + half_h).max(0) as usize).min(self.coords.height);
+        let w = right.saturating_sub(left);
+        let h = bottom.saturating_sub(top);
+        let mut pixels = Vec::with_capacity(w * h);
+        for row in top..bottom {
+            let start = row * self.coords.width + left;
+            pixels.extend_from_slice(&self.pixels[start..start + w]);
         }
+        (pixels, left, top, w, h)
     }
 
-    /// Restore a rectangular pixel region (for differential rerender).
     pub fn restore_region(&mut self, pixels: &[u32], px_x: usize, px_y: usize, px_w: usize, px_h: usize) {
-        match self {
-            Canvas::Fast(c) => {
-                let canvas_w = c.coords.width;
-                for row in 0..px_h {
-                    let dst_y = px_y + row;
-                    if dst_y >= c.coords.height { break; }
-                    let dst_start = dst_y * canvas_w + px_x;
-                    let src_start = row * px_w;
-                    if src_start + px_w <= pixels.len() && dst_start + px_w <= c.pixels.len() {
-                        c.pixels[dst_start..dst_start + px_w].copy_from_slice(&pixels[src_start..src_start + px_w]);
-                    }
-                }
+        let canvas_w = self.coords.width;
+        for row in 0..px_h {
+            let dst_y = px_y + row;
+            if dst_y >= self.coords.height { break; }
+            let dst_start = dst_y * canvas_w + px_x;
+            let src_start = row * px_w;
+            if src_start + px_w <= pixels.len() && dst_start + px_w <= self.pixels.len() {
+                self.pixels[dst_start..dst_start + px_w].copy_from_slice(&pixels[src_start..src_start + px_w]);
             }
-            Canvas::Quality(_) => {} // TODO
         }
     }
 
-    /// Blinkey cursor brightness constant (integer, maps to 0x01010100 * wave)
+    // ── Blinkey cursor (α+darkness: brighten = subtract darkness) ─────────
+
+    /// Cursor brightness peak (darkness units subtracted at the wave crest).
     const BLINKEY_BRIGHTNESS: i32 = 100;
-    /// Horizontal smear half-width in pixels
+    /// Horizontal smear half-width in pixels.
     const BLINKEY_SMEAR: i32 = 7;
 
-    /// Add blinkey wave (top-bright variant): wave = (1 - t²)(1 - t)² * BRIGHTNESS
-    /// Height spans full textbox (tip to tip). Horizontal smear attenuates with distance.
-    pub fn blinkey_add_top(&mut self, px_x: usize, px_y: usize, px_h: usize) {
-        let Canvas::Fast(c) = self else { return };
-        let w = c.coords.width;
-        let h = c.coords.height;
+    /// Apply the blinkey wave over a textbox column. `top_bright` picks the wave shape;
+    /// `brighten` subtracts darkness (show cursor) vs adds it back (erase).
+    fn blinkey(&mut self, px_x: usize, px_y: usize, px_h: usize, top_bright: bool, brighten: bool) {
+        let w = self.coords.width;
+        let h = self.coords.height;
         if px_h < 2 { return; }
         let half = px_h as i32 / 2;
         for row in 0..px_h {
             let y = px_y + row;
             if y >= h { break; }
-            // t in [-half, half] mapped to [-1, 1] via fixed-point (scale by 1024)
             let t_1024 = (row as i32 - half) * 1024 / half;
-            // (1 - t²)(1 - t)² all in fixed-point /1024
             let one_minus_t2 = 1024 - (t_1024 * t_1024 / 1024);
-            let one_minus_t = 1024 - t_1024;
-            let wave = one_minus_t2 * one_minus_t / 1024 * one_minus_t / 1024;
+            let shaped = if top_bright { 1024 - t_1024 } else { 1024 + t_1024 };
+            let wave = one_minus_t2 * shaped / 1024 * shaped / 1024;
             let bright = (wave * Self::BLINKEY_BRIGHTNESS / 1024).max(0) as u32;
             if bright == 0 { continue; }
             for dx in -Self::BLINKEY_SMEAR..=Self::BLINKEY_SMEAR {
                 let x = px_x as i32 + dx;
                 if x < 0 || x as usize >= w { continue; }
                 let idx = y * w + x as usize;
-                let atten = bright >> dx.unsigned_abs();
-                if atten > 0 {
-                    c.pixels[idx] = c.pixels[idx].saturating_add(0x01010100 * atten);
-                }
+                let k = bright >> dx.unsigned_abs();
+                if k == 0 { continue; }
+                let p = self.pixels[idx];
+                let a = p & 0xFF00_0000;
+                let (r, g, b) = ((p >> 16) & 0xFF, (p >> 8) & 0xFF, p & 0xFF);
+                let (r, g, b) = if brighten {
+                    (r.saturating_sub(k), g.saturating_sub(k), b.saturating_sub(k))
+                } else {
+                    ((r + k).min(255), (g + k).min(255), (b + k).min(255))
+                };
+                self.pixels[idx] = a | (r << 16) | (g << 8) | b;
             }
         }
     }
 
-    /// Add blinkey wave (bottom-bright variant): wave = (1 - t²)(1 + t)² * BRIGHTNESS
-    pub fn blinkey_add_bottom(&mut self, px_x: usize, px_y: usize, px_h: usize) {
-        let Canvas::Fast(c) = self else { return };
-        let w = c.coords.width;
-        let h = c.coords.height;
-        if px_h < 2 { return; }
-        let half = px_h as i32 / 2;
-        for row in 0..px_h {
-            let y = px_y + row;
-            if y >= h { break; }
-            let t_1024 = (row as i32 - half) * 1024 / half;
-            let one_minus_t2 = 1024 - (t_1024 * t_1024 / 1024);
-            let one_plus_t = 1024 + t_1024;
-            let wave = one_minus_t2 * one_plus_t / 1024 * one_plus_t / 1024;
-            let bright = (wave * Self::BLINKEY_BRIGHTNESS / 1024).max(0) as u32;
-            if bright == 0 { continue; }
-            for dx in -Self::BLINKEY_SMEAR..=Self::BLINKEY_SMEAR {
-                let x = px_x as i32 + dx;
-                if x < 0 || x as usize >= w { continue; }
-                let idx = y * w + x as usize;
-                let atten = bright >> dx.unsigned_abs();
-                if atten > 0 {
-                    c.pixels[idx] = c.pixels[idx].saturating_add(0x01010100 * atten);
-                }
-            }
-        }
+    pub fn blinkey_add_top(&mut self, px_x: usize, px_y: usize, px_h: usize) { self.blinkey(px_x, px_y, px_h, true, true); }
+    pub fn blinkey_add_bottom(&mut self, px_x: usize, px_y: usize, px_h: usize) { self.blinkey(px_x, px_y, px_h, false, true); }
+    pub fn blinkey_sub_top(&mut self, px_x: usize, px_y: usize, px_h: usize) { self.blinkey(px_x, px_y, px_h, true, false); }
+    pub fn blinkey_sub_bottom(&mut self, px_x: usize, px_y: usize, px_h: usize) { self.blinkey(px_x, px_y, px_h, false, false); }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use spirix::ScalarF4E4;
+    use vsf::types::VsfType;
+
+    // spirix's Zero is a special ambiguous pattern; `from_f32(0.0)` does NOT produce it (yields an
+    // undefined value → NaN downstream), so route exact zeros through the ZERO constant.
+    fn s(v: f32) -> ScalarF4E4 {
+        if v == 0.0 { ScalarF4E4::ZERO } else { ScalarF4E4::from_f32(v) }
+    }
+    fn c44(x: f32, y: f32) -> CircleF4E4 {
+        CircleF4E4::from((s(x), s(y)))
+    }
+    fn px(rgba: &[u8], w: usize, x: usize, y: usize) -> (u8, u8, u8) {
+        let i = (y * w + x) * 4;
+        (rgba[i], rgba[i + 1], rgba[i + 2])
     }
 
-    /// Subtract blinkey wave (top-bright variant) — exact inverse of add_top
-    pub fn blinkey_sub_top(&mut self, px_x: usize, px_y: usize, px_h: usize) {
-        let Canvas::Fast(c) = self else { return };
-        let w = c.coords.width;
-        let h = c.coords.height;
-        if px_h < 2 { return; }
-        let half = px_h as i32 / 2;
-        for row in 0..px_h {
-            let y = px_y + row;
-            if y >= h { break; }
-            let t_1024 = (row as i32 - half) * 1024 / half;
-            let one_minus_t2 = 1024 - (t_1024 * t_1024 / 1024);
-            let one_minus_t = 1024 - t_1024;
-            let wave = one_minus_t2 * one_minus_t / 1024 * one_minus_t / 1024;
-            let bright = (wave * Self::BLINKEY_BRIGHTNESS / 1024).max(0) as u32;
-            if bright == 0 { continue; }
-            for dx in -Self::BLINKEY_SMEAR..=Self::BLINKEY_SMEAR {
-                let x = px_x as i32 + dx;
-                if x < 0 || x as usize >= w { continue; }
-                let idx = y * w + x as usize;
-                let atten = bright >> dx.unsigned_abs();
-                if atten > 0 {
-                    c.pixels[idx] = c.pixels[idx].saturating_sub(0x01010100 * atten);
-                }
-            }
-        }
+    /// Filled rect over an opaque background lands its fill colour at the centre and leaves the bg
+    /// at the corner. Proves the painter-over composite (scratch → main) works against opaque bg.
+    #[test]
+    fn fill_rect_center_and_bg() {
+        let mut c = Canvas::new_fast(128, 128);
+        c.clear(&VsfType::rck).unwrap(); // opaque black bg
+        c.fill_rect_ru(c44(0.0, 0.0), c44(0.4, 0.4), &VsfType::ra([255, 0, 0, 255])).unwrap();
+        let rgba = c.to_rgba_bytes();
+        let (r, g, b) = px(&rgba, 128, 64, 64);
+        assert!(r >= 254 && g <= 1 && b <= 1, "centre is red, got ({r},{g},{b})");
+        assert_eq!(px(&rgba, 128, 2, 2), (0, 0, 0), "corner is black bg");
     }
 
-    /// Subtract blinkey wave (bottom-bright variant) — exact inverse of add_bottom
-    pub fn blinkey_sub_bottom(&mut self, px_x: usize, px_y: usize, px_h: usize) {
-        let Canvas::Fast(c) = self else { return };
-        let w = c.coords.width;
-        let h = c.coords.height;
-        if px_h < 2 { return; }
-        let half = px_h as i32 / 2;
-        for row in 0..px_h {
-            let y = px_y + row;
-            if y >= h { break; }
-            let t_1024 = (row as i32 - half) * 1024 / half;
-            let one_minus_t2 = 1024 - (t_1024 * t_1024 / 1024);
-            let one_plus_t = 1024 + t_1024;
-            let wave = one_minus_t2 * one_plus_t / 1024 * one_plus_t / 1024;
-            let bright = (wave * Self::BLINKEY_BRIGHTNESS / 1024).max(0) as u32;
-            if bright == 0 { continue; }
-            for dx in -Self::BLINKEY_SMEAR..=Self::BLINKEY_SMEAR {
-                let x = px_x as i32 + dx;
-                if x < 0 || x as usize >= w { continue; }
-                let idx = y * w + x as usize;
-                let atten = bright >> dx.unsigned_abs();
-                if atten > 0 {
-                    c.pixels[idx] = c.pixels[idx].saturating_sub(0x01010100 * atten);
-                }
-            }
-        }
+    /// A circle inks its centre and leaves a far corner clear.
+    #[test]
+    fn fill_circle_center() {
+        let mut c = Canvas::new_fast(128, 128);
+        c.clear(&VsfType::rck).unwrap();
+        c.fill_circle(c44(0.0, 0.0), ScalarF4E4::from_f32(0.3), &VsfType::ra([0, 255, 0, 255])).unwrap();
+        let rgba = c.to_rgba_bytes();
+        let (r, g, b) = px(&rgba, 128, 64, 64);
+        assert!(g >= 254 && r <= 1 && b <= 1, "centre is green, got ({r},{g},{b})");
+        assert_eq!(px(&rgba, 128, 2, 2), (0, 0, 0), "corner untouched");
+    }
+
+    /// Later draws land on top (painter's order) — a blue rect drawn after a red one wins the overlap.
+    #[test]
+    fn later_draw_wins_overlap() {
+        let mut c = Canvas::new_fast(128, 128);
+        c.clear(&VsfType::rck).unwrap();
+        c.fill_rect_ru(c44(0.0, 0.0), c44(0.5, 0.5), &VsfType::ra([255, 0, 0, 255])).unwrap();
+        c.fill_rect_ru(c44(0.0, 0.0), c44(0.3, 0.3), &VsfType::ra([0, 0, 255, 255])).unwrap();
+        let (_, _, b) = px(&c.to_rgba_bytes(), 128, 64, 64);
+        assert!(b >= 254, "later blue rect is on top, got b={b}");
+    }
+
+    /// A horizontal hairline inks its row and leaves rows a few pixels away clear.
+    #[test]
+    fn hline_inks_one_row() {
+        let mut c = Canvas::new_fast(128, 128);
+        c.clear(&VsfType::rck).unwrap();
+        c.hline_ru(ScalarF4E4::ZERO, ScalarF4E4::from_f32(-0.4), ScalarF4E4::from_f32(0.4), &VsfType::rcb).unwrap();
+        let rgba = c.to_rgba_bytes();
+        let (_, _, b_on) = px(&rgba, 128, 64, 64);
+        assert!(b_on >= 200, "hairline row is blue-inked, got b={b_on}");
+        assert_eq!(px(&rgba, 128, 64, 60), (0, 0, 0), "four rows away is clean bg");
     }
 }
