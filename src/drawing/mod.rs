@@ -1,14 +1,13 @@
-//! Drawing layer — single fluor-backed pipeline.
+//! Drawing layer — single fluor-backed pipeline, front-to-back.
 //!
 //! `Canvas` owns an α+darkness pixel buffer (`0xααRRGGBB`, RGB = 255−visible) and draws into it
-//! with fluor's paint primitives + `TextRenderer`. The old dual Fast(sRGB)/Quality(linear) pipelines
-//! and their bespoke rasterizers are gone; fluor is the one compositor.
-//!
-//! **Compositing direction.** fluor paints *front-to-back* (`under` blend: new content goes behind
-//! what's already there, opaque pixels early-out). toka emits *back-to-front* (painter's: clear an
-//! opaque background, then draw over it). To bridge, every primitive rasterizes into a transparent
-//! `scratch` buffer first (fluor AA onto empty), then [`Canvas::blit_scratch`] composites scratch
-//! *over* the main buffer (`scratch.under(main)` — new in front), so later draws land on top.
+//! with fluor's paint primitives + `TextRenderer`, in fluor's native order: **front-to-back**.
+//! The buffer starts EMPTY (`0x00000000`); content paints frontmost-first (cell text → grid lines
+//! → row fills — see `VM::render_table`), each `under`-blending BEHIND what's already there with
+//! the opaque early-out skipping occluded pixels. The photon "liquid stone" noise backdrop
+//! ([`fluor::paint::background_noise`]) lands last of all in [`Canvas::to_rgba_bytes`], under-
+//! compositing behind every remaining empty/translucent pixel. This mirrors photon's fluor-native
+//! GUI (`PhotonApp::render`): widgets and watermarks first, background noise as the final pass.
 //!
 //! Coordinates: RU math stays in [`shared::RuCoords`] (spirix, center-origin, harmonic-mean span);
 //! each primitive converts to f32 pixel space at the fluor boundary via the `ru_to_px_*f` helpers.
@@ -25,26 +24,37 @@ use shared::RuCoords as Coords;
 use spirix::{CircleF4E4, ScalarF4E4};
 use std::collections::HashMap;
 
-use fluor::canvas::{Canvas as FCanvas, Damage, PixelRect};
-use fluor::paint::{self, Clip};
+use fluor::canvas::{Canvas as FCanvas, Damage};
+use fluor::paint::{self, Clip, HitId};
 use fluor::pixel::Blend;
 use fluor::text::TextRenderer;
+use fluor::widgets::button::Button as FButton;
+use fluor::widgets::textbox::Textbox as FTextbox;
 
-/// Opaque black in α+darkness (α=255, darkness=255 → visible black). The default surface fill.
-const OPAQUE_BLACK: u32 = 0xFFFF_FFFF;
+/// Empty pixel — no opacity, no darkness. The canvas resets to this; the noise backdrop
+/// under-fills whatever content leaves empty.
+const EMPTY: u32 = 0x0000_0000;
 
 /// Single fluor-backed canvas.
 pub struct Canvas {
     coords: Coords,
-    /// α+darkness pixel buffer (the composited result).
+    /// α+darkness pixel buffer, composited front-to-back.
     pixels: Vec<u32>,
-    /// Transparent scratch each primitive rasterizes into before being composited over `pixels`.
-    /// Kept at zero between draws (blit resets the touched region), so it never needs a full clear.
-    scratch: Vec<u32>,
     /// fluor text engine (owns its cosmic-text font system + glyph cache).
     text: TextRenderer,
     /// Capsule-shipped fonts: `font_key` → registered family name in fluor's font DB.
     fonts: HashMap<[u8; 32], String>,
+    /// fluor widgets keyed by the VM's widget id — persist across frames so their pill/text
+    /// caches survive and (for textboxes) blinkey/scroll state carries over.
+    buttons: HashMap<u32, FButton>,
+    textboxes: HashMap<u32, FTextbox>,
+    /// Dense fluor hit-id allocator for the widgets above (toka routes hits itself via RU
+    /// hit_regions, so these ids are only used for fluor's internal hover bookkeeping).
+    hit_counter: HitId,
+    /// Saved cursor-strip pixels per focused textbox: (pixels, x, y, w, h). Captured after the
+    /// textbox content renders but before the blinkey wave, so a blink flip can restore the
+    /// strip and repaint the alternate wave without a full frame rerun.
+    cursor_snaps: HashMap<u32, (Vec<u32>, usize, usize, usize, usize)>,
 }
 
 /// Map toka's blend-mode enum onto fluor's smaller set; anything without a fluor equivalent
@@ -68,10 +78,13 @@ impl Canvas {
     pub fn new_fast(width: usize, height: usize) -> Self {
         Self {
             coords: Coords::new(width, height),
-            pixels: vec![OPAQUE_BLACK; width * height],
-            scratch: vec![0u32; width * height],
+            pixels: vec![EMPTY; width * height],
             text: TextRenderer::new(),
             fonts: HashMap::new(),
+            buttons: HashMap::new(),
+            textboxes: HashMap::new(),
+            hit_counter: 1,
+            cursor_snaps: HashMap::new(),
         }
     }
 
@@ -109,53 +122,34 @@ impl Canvas {
         }
     }
 
-    /// Composite the scratch buffer *over* `pixels` within `bb` (painter's order — scratch is the
-    /// new content, in front), then reset the touched scratch pixels back to transparent.
-    fn blit_scratch(&mut self, bb: PixelRect) {
-        if bb.is_empty() { return; }
-        let w = self.coords.width;
-        let h = self.coords.height;
-        let x0 = bb.x0.min(w);
-        let x1 = bb.x1.min(w);
-        let y0 = bb.y0.min(h);
-        let y1 = bb.y1.min(h);
-        for y in y0..y1 {
-            let row = y * w;
-            for x in x0..x1 {
-                let i = row + x;
-                let s = self.scratch[i];
-                if s >> 24 != 0 {
-                    self.pixels[i] = s.under(self.pixels[i], fluor::BlendMode::Normal);
-                    self.scratch[i] = 0;
-                }
-            }
-        }
-    }
-
-    /// Rasterize one primitive into the transparent scratch buffer via `f`, then composite it over
-    /// the main buffer. `f` receives a fluor canvas backed by `scratch`.
-    fn paint_over(&mut self, f: impl FnOnce(&mut FCanvas)) {
-        let (w, h) = (self.coords.width, self.coords.height);
-        let mut dmg = Damage::new();
-        {
-            let mut fc = FCanvas::new(&mut self.scratch, w, h, &mut dmg);
-            f(&mut fc);
-        }
-        self.blit_scratch(dmg.bbox());
-    }
-
-    pub fn clear(&mut self, colour: &vsf::VsfType) -> Result<(), String> {
-        let c = crate::renderer::extract_colour_u32(colour)?;
+    /// Reset the (clip band of the) canvas to EMPTY for a fresh front-to-back pass. The capsule's
+    /// requested clear colour is superseded by the photon noise backdrop painted at output time —
+    /// one look across the whole fluor stack.
+    pub fn clear(&mut self, _colour: &vsf::VsfType) -> Result<(), String> {
         let w = self.coords.width;
         let y0 = self.coords.clip_y_min;
         let y1 = self.coords.clip_y_max;
-        self.pixels[y0 * w..y1 * w].fill(c);
+        self.pixels[y0 * w..y1 * w].fill(EMPTY);
+        // Frame reset: cursor snapshots reference the old frame's pixels.
+        self.cursor_snaps.clear();
         Ok(())
     }
 
-    /// Convert α+darkness buffer → visible RGBA bytes for browser ImageData.
-    /// `pixel ^ 0x00FFFFFF` flips darkness→visible RGB; the surface is forced opaque.
-    pub fn to_rgba_bytes(&self) -> Vec<u8> {
+    /// Final composite + output: under-paint the photon "liquid stone" noise backdrop behind all
+    /// content (idempotent — pixels already opaque early-out), then flip α+darkness → visible RGBA
+    /// for the browser's ImageData.
+    ///
+    /// The noise scrolls with content (photon behaviour): `scroll_offset` shifts which logical row
+    /// seeds each screen row, so the exposed strip after a scroll regenerates pattern-continuous
+    /// rows rather than restarting at the screen edge.
+    pub fn to_rgba_bytes(&mut self) -> Vec<u8> {
+        let (w, h) = (self.coords.width, self.coords.height);
+        let scroll_px = self.coords.ru_to_px_h(self.coords.scroll_y);
+        {
+            let mut dmg = Damage::new();
+            let mut fc = FCanvas::new(&mut self.pixels, w, h, &mut dmg);
+            paint::background_noise(&mut fc, 0, true, scroll_px, None, None);
+        }
         let mut bytes = Vec::with_capacity(self.pixels.len() * 4);
         for &p in &self.pixels {
             let v = p ^ 0x00FF_FFFF;
@@ -167,7 +161,7 @@ impl Canvas {
         bytes
     }
 
-    // ── Geometry primitives (fluor paint into scratch, composited over) ──
+    // ── Geometry primitives (fluor paint, direct under-blend, f32 pixel space) ──
 
     pub fn fill_rect_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, colour: &vsf::VsfType) -> Result<(), String> {
         let c = crate::renderer::extract_colour_u32(colour)?;
@@ -176,7 +170,10 @@ impl Canvas {
         let w = self.coords.ru_to_px_wf(size.r());
         let h = self.coords.ru_to_px_hf(size.i());
         let clip = self.clip();
-        self.paint_over(|fc| paint::draw_rect(fc, cx, cy, w, h, c, clip));
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(&mut self.pixels, bw, bh, &mut dmg);
+        paint::draw_rect(&mut fc, cx, cy, w, h, c, clip);
         Ok(())
     }
 
@@ -190,7 +187,10 @@ impl Canvas {
         let cx = (px0 + px1) * 0.5;
         let w = (px1 - px0).abs();
         let clip = self.clip();
-        self.paint_over(|fc| paint::draw_rect(fc, cx, py, w, 0.0, c, clip));
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(&mut self.pixels, bw, bh, &mut dmg);
+        paint::draw_rect(&mut fc, cx, py, w, 0.0, c, clip);
         Ok(())
     }
 
@@ -203,7 +203,10 @@ impl Canvas {
         let cy = (py0 + py1) * 0.5;
         let h = (py1 - py0).abs();
         let clip = self.clip();
-        self.paint_over(|fc| paint::draw_rect(fc, px, cy, 0.0, h, c, clip));
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(&mut self.pixels, bw, bh, &mut dmg);
+        paint::draw_rect(&mut fc, px, cy, 0.0, h, c, clip);
         Ok(())
     }
 
@@ -216,9 +219,11 @@ impl Canvas {
         let h = self.coords.ru_to_px_hf(size.i());
         let x = (cx - w * 0.5).round() as isize;
         let yy = (cy - h * 0.5).round() as isize;
-        let (rw, rh) = (w.round() as isize, h.round() as isize);
         let clip = self.clip();
-        self.paint_over(|fc| paint::stroke_rect(fc, x, yy, rw, rh, 1, c, clip, None));
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(&mut self.pixels, bw, bh, &mut dmg);
+        paint::stroke_rect(&mut fc, x, yy, w.round() as isize, h.round() as isize, 1, c, clip, None);
         Ok(())
     }
 
@@ -228,9 +233,12 @@ impl Canvas {
         let cy = self.coords.ru_to_px_yf(pos.i());
         let w = self.coords.ru_to_px_wf(size.r());
         let h = self.coords.ru_to_px_hf(size.i());
-        let ang = angle.to_f64() as f32;
+        let ang = angle.to_f32();
         let clip = self.clip();
-        self.paint_over(|fc| paint::draw_rect_rotated(fc, cx, cy, w, h, ang, c, clip));
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(&mut self.pixels, bw, bh, &mut dmg);
+        paint::draw_rect_rotated(&mut fc, cx, cy, w, h, ang, c, clip);
         Ok(())
     }
 
@@ -240,7 +248,10 @@ impl Canvas {
         let cy = self.coords.ru_to_px_yf(center.i());
         let r = self.coords.ru_to_px_wf(radius);
         let clip = self.clip();
-        self.paint_over(|fc| paint::draw_circle(fc, cx, cy, r, c, clip));
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(&mut self.pixels, bw, bh, &mut dmg);
+        paint::draw_circle(&mut fc, cx, cy, r, c, clip);
         Ok(())
     }
 
@@ -251,25 +262,20 @@ impl Canvas {
         let rx = self.coords.ru_to_px_wf(radii.r());
         let ry = self.coords.ru_to_px_hf(radii.i());
         let clip = self.clip();
-        self.paint_over(|fc| paint::draw_ellipse(fc, cx, cy, rx, ry, c, clip));
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(&mut self.pixels, bw, bh, &mut dmg);
+        paint::draw_ellipse(&mut fc, cx, cy, rx, ry, c, clip);
         Ok(())
     }
 
-    /// Ellipse outline. fluor has no stroke-ellipse primitive; approximate the ring as an outer
-    /// filled ellipse (the VSF renderer currently rejects strokes upstream, so this path is
-    /// effectively unused — kept faithful to the API surface).
+    /// Ellipse outline. fluor has no stroke-ellipse primitive; approximate as a filled ellipse
+    /// (the VSF renderer currently rejects strokes upstream, so this path is effectively unused).
     pub fn stroke_ellipse(&mut self, center: CircleF4E4, radii: CircleF4E4, _stroke_width: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {
-        let c = crate::renderer::extract_colour_u32(colour)?;
-        let cx = self.coords.ru_to_px_xf(center.r());
-        let cy = self.coords.ru_to_px_yf(center.i());
-        let rx = self.coords.ru_to_px_wf(radii.r());
-        let ry = self.coords.ru_to_px_hf(radii.i());
-        let clip = self.clip();
-        self.paint_over(|fc| paint::draw_ellipse(fc, cx, cy, rx, ry, c, clip));
-        Ok(())
+        self.fill_ellipse(center, radii, colour)
     }
 
-    /// General line via a thin rotated rect (fluor has no line primitive; a rotated rect is it).
+    /// General line via a thin rotated rect (fluor's line = degenerate rect).
     pub fn draw_line(&mut self, start: CircleF4E4, end: CircleF4E4, colour: &vsf::VsfType, settings: &LineSettings) -> Result<(), String> {
         let c = crate::renderer::extract_colour_u32(colour)?;
         let x0 = self.coords.ru_to_px_xf(start.r());
@@ -284,7 +290,10 @@ impl Canvas {
         let cx = (x0 + x1) * 0.5;
         let cy = (y0 + y1) * 0.5;
         let clip = self.clip();
-        self.paint_over(|fc| paint::draw_rect_rotated(fc, cx, cy, len, weight, ang, c, clip));
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(&mut self.pixels, bw, bh, &mut dmg);
+        paint::draw_rect_rotated(&mut fc, cx, cy, len, weight, ang, c, clip);
         Ok(())
     }
 
@@ -323,36 +332,44 @@ impl Canvas {
 
         let clip = self.clip();
         let (w, h) = (self.coords.width, self.coords.height);
+        // Split borrows: `text` and `pixels` are disjoint fields.
+        let Canvas { text: engine, pixels, .. } = self;
         let mut dmg = Damage::new();
-        {
-            // Split borrows: `text` and `scratch` are disjoint fields; rasterize into scratch.
-            let Canvas { text: engine, scratch, .. } = self;
-            let mut fc = FCanvas::new(scratch, w, h, &mut dmg);
+        let mut fc = FCanvas::new(pixels, w, h, &mut dmg);
+        // fluor's draw_text_* centre a SINGLE line on `y` (its height measure is the first
+        // layout run only), so multi-line blocks must be split here and block-centred: line i
+        // of n draws at cy − (n−1−2i)·line_h/2. line_h matches fluor's Metrics::relative ratio.
+        let lines: Vec<&str> = text.split('\n').collect();
+        let n = lines.len();
+        let line_h = px * 1.2;
+        for (i, line) in lines.into_iter().enumerate() {
+            if line.is_empty() { continue; }
+            let ly = cy - (n as f32 - 1.0 - 2.0 * i as f32) * line_h * 0.5;
             match settings.align {
-                1 => { engine.draw_text_left_u32(&mut fc, text, cx, cy, px, weight, c, &family, clip, None, None); }
-                2 => { engine.draw_text_right_u32(&mut fc, text, cx, cy, px, weight, c, &family, clip, None, None); }
-                _ => { engine.draw_text_center_u32(&mut fc, text, cx, cy, px, weight, c, &family, clip, None, None); }
+                1 => { engine.draw_text_left_u32(&mut fc, line, cx, ly, px, weight, c, &family, clip, None, None); }
+                2 => { engine.draw_text_right_u32(&mut fc, line, cx, ly, px, weight, c, &family, clip, None, None); }
+                _ => { engine.draw_text_center_u32(&mut fc, line, cx, ly, px, weight, c, &family, clip, None, None); }
             }
         }
-        self.blit_scratch(dmg.bbox());
         Ok(())
     }
 
     // ── Scroll / layers / regions ────────────────────────────────────────
 
-    /// Shift the buffer by `delta_y` rows; the exposed strip is filled with `bg` (α+darkness).
-    pub fn scroll_pixels(&mut self, delta_y: isize, bg: u32) {
+    /// Shift the buffer by `delta_y` rows; the exposed strip resets to EMPTY (`bg` is ignored —
+    /// the noise backdrop under-fills the strip at output, pattern-continuous via scroll offset).
+    pub fn scroll_pixels(&mut self, delta_y: isize, _bg: u32) {
         let h = self.coords.height;
         let w = self.coords.width;
         let d = delta_y.unsigned_abs().min(h);
         if d == 0 { return; }
-        if d >= h { self.pixels.fill(bg); return; }
+        if d >= h { self.pixels.fill(EMPTY); return; }
         if delta_y > 0 {
             self.pixels.copy_within(d * w..h * w, 0);
-            self.pixels[((h - d) * w)..].fill(bg);
+            self.pixels[((h - d) * w)..].fill(EMPTY);
         } else {
             self.pixels.copy_within(0..(h - d) * w, d * w);
-            self.pixels[..d * w].fill(bg);
+            self.pixels[..d * w].fill(EMPTY);
         }
     }
 
@@ -363,14 +380,18 @@ impl Canvas {
         coords.set_scroll_y(self.coords.scroll_y);
         Canvas {
             coords,
-            pixels: vec![0u32; self.coords.width * self.coords.height], // fully transparent
-            scratch: vec![0u32; self.coords.width * self.coords.height],
+            pixels: vec![EMPTY; self.coords.width * self.coords.height],
             text: TextRenderer::new(),
             fonts: HashMap::new(),
+            buttons: HashMap::new(),
+            textboxes: HashMap::new(),
+            hit_counter: 1,
+            cursor_snaps: HashMap::new(),
         }
     }
 
-    /// Composite `layer` on top of self with opacity + blend mode (α+darkness under-blend).
+    /// Composite a finished layer into the front-to-back stream: the layer goes BEHIND existing
+    /// content and in front of anything drawn after (`layer.under(main)`), scaled by opacity.
     pub fn composite_layer(&mut self, layer: &Canvas, opacity: ScalarF4E4, mode: BlendMode) {
         let op = (opacity * 255i32).to_i32().clamp(0, 255) as u32;
         if op == 0 { return; }
@@ -382,7 +403,6 @@ impl Canvas {
             if sa == 0 { continue; } // transparent source pixel
             let scaled_a = (sa * op / 255) & 0xFF;
             let top = (scaled_a << 24) | (s & 0x00FF_FFFF);
-            // layer sits on top; base is underneath → top.under(base)
             self.pixels[i] = top.under(self.pixels[i], fmode);
         }
     }
@@ -420,6 +440,129 @@ impl Canvas {
                 self.pixels[dst_start..dst_start + px_w].copy_from_slice(&pixels[src_start..src_start + px_w]);
             }
         }
+    }
+
+    // ── fluor widgets (buttons / textboxes) ─────────────────────────────
+
+    /// Paint a fluor `Button` for VM widget `id` at the RU rect. Widget state (pill/text caches)
+    /// persists across frames keyed by id. toka routes hits itself via RU hit_regions; the fluor
+    /// hit id is only for the widget's internal bookkeeping.
+    pub fn draw_widget_button(&mut self, id: u32, pos: CircleF4E4, size: CircleF4E4, label: &str) -> Result<(), String> {
+        let cx = self.coords.ru_to_px_xf(pos.r());
+        let cy = self.coords.ru_to_px_yf(pos.i());
+        let w = self.coords.ru_to_px_wf(size.r());
+        let h = self.coords.ru_to_px_hf(size.i());
+        let fs = h * (2.0 / 3.0);
+        let clip = self.clip();
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let Canvas { pixels, text: engine, buttons, hit_counter, .. } = self;
+        let btn = buttons
+            .entry(id)
+            .or_insert_with(|| FButton::new(hit_counter, cx, cy, w, h, fs, label));
+        btn.set_rect(cx, cy, w, h);
+        btn.set_font_size(fs);
+        if btn.label() != label {
+            btn.set_label(label);
+        }
+        let hid = btn.hit_id();
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(pixels, bw, bh, &mut dmg);
+        btn.render_content_into(&mut fc, 0.0, 0.0, engine, clip, None, hid);
+        Ok(())
+    }
+
+    /// Paint a fluor `Textbox` for VM widget `id`, syncing content/cursor/focus from the VM's
+    /// input state (the VM stays the source of truth; the widget is the renderer). When focused,
+    /// snapshots the cursor strip (post-content, pre-wave) so [`Self::flip_textbox_blinkey`] can
+    /// animate the cursor without a frame rerun, then paints the wave.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_widget_textbox(
+        &mut self,
+        id: u32,
+        pos: CircleF4E4,
+        size: CircleF4E4,
+        font_size: ScalarF4E4,
+        content: &str,
+        cursor: usize,
+        is_focused: bool,
+        placeholder: &str,
+    ) -> Result<(), String> {
+        let cx = self.coords.ru_to_px_xf(pos.r());
+        let cy = self.coords.ru_to_px_yf(pos.i());
+        let w = self.coords.ru_to_px_wf(size.r());
+        let h = self.coords.ru_to_px_hf(size.i());
+        let fs = self.coords.ru_to_px_hf(font_size);
+        let clip = self.clip();
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let Canvas { pixels, text: engine, textboxes, hit_counter, cursor_snaps, .. } = self;
+        let tb = textboxes
+            .entry(id)
+            .or_insert_with(|| FTextbox::new(hit_counter, cx, cy, w, h, fs));
+        tb.set_rect(cx, cy, w, h);
+        tb.set_font_size(fs, engine);
+        let current: String = tb.chars.iter().collect();
+        if current != content {
+            tb.clear();
+            tb.insert_str(content, engine);
+        }
+        tb.cursor = cursor.min(tb.chars.len());
+        tb.set_focused(is_focused);
+        if is_focused {
+            tb.blinkey_visible = true;
+        }
+
+        let hid = tb.hit_id();
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(pixels, bw, bh, &mut dmg);
+        // Placeholder: faint text drawn FIRST (frontmost) when empty + unfocused; the pill
+        // interior paints under it. fluor Textbox has no placeholder concept of its own.
+        if content.is_empty() && !is_focused && !placeholder.is_empty() {
+            let ph = paint::pack_argb(160, 160, 160, 140);
+            let tl = tb.text_left();
+            engine.draw_text_left_u32(&mut fc, placeholder, tl, cy, fs, 400, ph, "Open Sans", clip, None, None);
+        }
+        tb.render_content_into(&mut fc, 0.0, 0.0, engine, clip, None, None, hid);
+
+        if is_focused {
+            // Snapshot the cursor strip AFTER content, BEFORE the wave — the blink flip
+            // restores this and repaints the alternate wave.
+            let bb = tb.cursor_bbox();
+            let sx = (bb.x.floor().max(0.0) as usize).min(bw);
+            let sy = (bb.y.floor().max(0.0) as usize).min(bh);
+            let sw = (bb.w.ceil() as usize).min(bw - sx);
+            let sh = (bb.h.ceil() as usize).min(bh - sy);
+            if sw > 0 && sh > 0 {
+                let mut snap = Vec::with_capacity(sw * sh);
+                for row in sy..sy + sh {
+                    snap.extend_from_slice(&fc.pixels[row * bw + sx..row * bw + sx + sw]);
+                }
+                cursor_snaps.insert(id, (snap, sx, sy, sw, sh));
+            }
+            tb.render_blinkey_into(&mut fc, 0.0, 0.0);
+        } else {
+            cursor_snaps.remove(&id);
+        }
+        Ok(())
+    }
+
+    /// Blink tick for the focused textbox: restore the saved cursor strip, flip fluor's wave
+    /// state (alternating top/bottom-bright), repaint. No-op without a focused textbox + snapshot.
+    pub fn flip_textbox_blinkey(&mut self, id: u32) {
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let Canvas { pixels, textboxes, cursor_snaps, .. } = self;
+        let Some(tb) = textboxes.get_mut(&id) else { return };
+        if !tb.is_focused() {
+            return;
+        }
+        let Some((snap, sx, sy, sw, sh)) = cursor_snaps.get(&id) else { return };
+        for row in 0..*sh {
+            let dst = (sy + row) * bw + sx;
+            pixels[dst..dst + sw].copy_from_slice(&snap[row * sw..(row + 1) * sw]);
+        }
+        tb.flip_blinkey();
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(pixels, bw, bh, &mut dmg);
+        tb.render_blinkey_into(&mut fc, 0.0, 0.0);
     }
 
     // ── Blinkey cursor (α+darkness: brighten = subtract darkness) ─────────
@@ -476,8 +619,9 @@ mod render_tests {
     use spirix::ScalarF4E4;
     use vsf::types::VsfType;
 
-    // spirix's Zero is a special ambiguous pattern; `from_f32(0.0)` does NOT produce it (yields an
-    // undefined value → NaN downstream), so route exact zeros through the ZERO constant.
+    // NOTE: on spirix 0.0.12 (toka's pinned crates.io version) `from_f32(0.0)` does NOT yield a
+    // clean zero — downstream `to_f32()` produces NaN. The local /mnt/Octopus/Code/spirix tree
+    // fixed this, but toka is pinned to 0.0.12. Route exact zeros through ZERO.
     fn s(v: f32) -> ScalarF4E4 {
         if v == 0.0 { ScalarF4E4::ZERO } else { ScalarF4E4::from_f32(v) }
     }
@@ -488,52 +632,66 @@ mod render_tests {
         let i = (y * w + x) * 4;
         (rgba[i], rgba[i + 1], rgba[i + 2])
     }
+    /// The noise backdrop is dark (photon BG_BASE + masked walk) — every channel stays low.
+    fn is_backdrop((r, g, b): (u8, u8, u8)) -> bool {
+        r < 0x40 && g < 0x40 && b < 0x40
+    }
 
-    /// Filled rect over an opaque background lands its fill colour at the centre and leaves the bg
-    /// at the corner. Proves the painter-over composite (scratch → main) works against opaque bg.
+    /// A filled rect on the empty canvas is opaque at its centre; untouched corners get the photon
+    /// noise backdrop at output. Proves the front-to-back chain end to end.
     #[test]
-    fn fill_rect_center_and_bg() {
+    fn fill_rect_center_and_backdrop() {
         let mut c = Canvas::new_fast(128, 128);
-        c.clear(&VsfType::rck).unwrap(); // opaque black bg
         c.fill_rect_ru(c44(0.0, 0.0), c44(0.4, 0.4), &VsfType::ra([255, 0, 0, 255])).unwrap();
         let rgba = c.to_rgba_bytes();
         let (r, g, b) = px(&rgba, 128, 64, 64);
         assert!(r >= 254 && g <= 1 && b <= 1, "centre is red, got ({r},{g},{b})");
-        assert_eq!(px(&rgba, 128, 2, 2), (0, 0, 0), "corner is black bg");
+        assert!(is_backdrop(px(&rgba, 128, 2, 2)), "corner is dark noise backdrop, got {:?}", px(&rgba, 128, 2, 2));
     }
 
-    /// A circle inks its centre and leaves a far corner clear.
+    /// Front-to-back: the FIRST draw is frontmost — a later overlapping draw lands behind it.
+    #[test]
+    fn earlier_draw_wins_overlap() {
+        let mut c = Canvas::new_fast(128, 128);
+        c.fill_rect_ru(c44(0.0, 0.0), c44(0.3, 0.3), &VsfType::ra([0, 0, 255, 255])).unwrap();
+        c.fill_rect_ru(c44(0.0, 0.0), c44(0.5, 0.5), &VsfType::ra([255, 0, 0, 255])).unwrap();
+        let rgba = c.to_rgba_bytes();
+        let (_, _, b) = px(&rgba, 128, 64, 64);
+        assert!(b >= 254, "earlier blue rect stays in front, got b={b}");
+        // span = 64 px/RU: red 0.5 RU → x∈[48,80); blue 0.3 RU → x∈[54.4,73.6). x=50 is red-only.
+        let (r_edge, _, _) = px(&rgba, 128, 50, 64);
+        assert!(r_edge >= 254, "later red shows where blue doesn't cover, got r={r_edge}");
+    }
+
+    /// A circle inks its centre; corners stay backdrop.
     #[test]
     fn fill_circle_center() {
         let mut c = Canvas::new_fast(128, 128);
-        c.clear(&VsfType::rck).unwrap();
         c.fill_circle(c44(0.0, 0.0), ScalarF4E4::from_f32(0.3), &VsfType::ra([0, 255, 0, 255])).unwrap();
         let rgba = c.to_rgba_bytes();
         let (r, g, b) = px(&rgba, 128, 64, 64);
         assert!(g >= 254 && r <= 1 && b <= 1, "centre is green, got ({r},{g},{b})");
-        assert_eq!(px(&rgba, 128, 2, 2), (0, 0, 0), "corner untouched");
+        assert!(is_backdrop(px(&rgba, 128, 2, 2)), "corner untouched → backdrop");
     }
 
-    /// Later draws land on top (painter's order) — a blue rect drawn after a red one wins the overlap.
-    #[test]
-    fn later_draw_wins_overlap() {
-        let mut c = Canvas::new_fast(128, 128);
-        c.clear(&VsfType::rck).unwrap();
-        c.fill_rect_ru(c44(0.0, 0.0), c44(0.5, 0.5), &VsfType::ra([255, 0, 0, 255])).unwrap();
-        c.fill_rect_ru(c44(0.0, 0.0), c44(0.3, 0.3), &VsfType::ra([0, 0, 255, 255])).unwrap();
-        let (_, _, b) = px(&c.to_rgba_bytes(), 128, 64, 64);
-        assert!(b >= 254, "later blue rect is on top, got b={b}");
-    }
-
-    /// A horizontal hairline inks its row and leaves rows a few pixels away clear.
+    /// A horizontal hairline inks its row; rows a few pixels away are backdrop.
     #[test]
     fn hline_inks_one_row() {
         let mut c = Canvas::new_fast(128, 128);
-        c.clear(&VsfType::rck).unwrap();
-        c.hline_ru(ScalarF4E4::ZERO, ScalarF4E4::from_f32(-0.4), ScalarF4E4::from_f32(0.4), &VsfType::rcb).unwrap();
+        c.hline_ru(ScalarF4E4::ZERO, s(-0.4), s(0.4), &VsfType::ra([0, 0, 255, 255])).unwrap();
         let rgba = c.to_rgba_bytes();
         let (_, _, b_on) = px(&rgba, 128, 64, 64);
         assert!(b_on >= 200, "hairline row is blue-inked, got b={b_on}");
-        assert_eq!(px(&rgba, 128, 64, 60), (0, 0, 0), "four rows away is clean bg");
+        assert!(is_backdrop(px(&rgba, 128, 64, 60)), "four rows away is backdrop");
+    }
+
+    /// clear() resets to empty — output becomes pure backdrop everywhere.
+    #[test]
+    fn clear_resets_to_backdrop() {
+        let mut c = Canvas::new_fast(128, 128);
+        c.fill_rect_ru(c44(0.0, 0.0), c44(0.5, 0.5), &VsfType::ra([255, 0, 0, 255])).unwrap();
+        c.clear(&VsfType::rck).unwrap();
+        let rgba = c.to_rgba_bytes();
+        assert!(is_backdrop(px(&rgba, 128, 64, 64)), "cleared centre is backdrop");
     }
 }

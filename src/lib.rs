@@ -180,8 +180,10 @@ pub mod wasm {
         ///
         /// Returns Vec<u8> with format [R, G, B, A, R, G, B, A, ...]
         /// suitable for `new ImageData(new Uint8ClampedArray(bytes), width, height)`
-        pub fn get_canvas_rgba(&self) -> Vec<u8> {
-            self.vm.canvas().to_rgba_bytes()
+        pub fn get_canvas_rgba(&mut self) -> Vec<u8> {
+            // &mut: the output pass under-composites the photon noise backdrop into the buffer
+            // (idempotent — opaque pixels early-out) before flipping to visible RGBA.
+            self.vm.canvas_mut().to_rgba_bytes()
         }
 
         /// Get canvas width in pixels

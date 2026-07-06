@@ -1,0 +1,14 @@
+[package]
+name = "libc-shim"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
+
+[features]
+default = []
+derive = ["libc/extra_traits"]
+extra_traits = ["libc/extra_traits"]
+align = ["libc/align"]
+std = ["libc/std"]

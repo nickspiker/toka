@@ -57,4 +57,14 @@ harness = false
 [features]
 default = ["console_error_panic_hook", "runtime"]
 console_error_panic_hook = ["dep:console_error_panic_hook"]
-runtime = ["dep:fontdue", "dep:fluor"]
+# `runtime` is the rendering path (fluor canvas + fonts); image decode rides along here so a
+# capsule can blit an avatar/icon. Gating it under `runtime` keeps it OUT of the fgtw-bootstrap
+# worker build, which takes toka with `default-features = false` and must stay tiny.
+runtime = ["dep:fontdue", "dep:fluor", "vsf/image-decode"]
+
+# rav1d (AV1 decoder, pulled by vsf/image-decode) can't build for wasm32-unknown-unknown off the
+# shelf — the OS-less target lacks a few libc type aliases it imports. The vendored fork renames
+# its `libc` dep to `vendor/libc-shim`, which re-exports libc plus those ~11 defs on wasm. This
+# patch only applies when toka is the build root (browser build); the worker build ignores it.
+[patch.crates-io]
+rav1d = { path = "vendor/rav1d" }

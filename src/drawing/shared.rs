@@ -88,12 +88,12 @@ impl RuCoords {
 
     // f32 pixel-space variants — same formula, but keep the sub-pixel fraction so fluor's
     // AA primitives can antialias against the true edge instead of a pre-floored integer.
-    // spirix `to_f64() as f32` is lossless for a coordinate (F4E4's fraction is narrower than
-    // f32's mantissa) and already maps escaped/ambiguous values to sane f32.
-    #[inline] pub fn ru_to_px_xf(&self, x: ScalarF4E4) -> f32 { (self.half_dims.r() + x * self.span * self.ru).to_f64() as f32 }
-    #[inline] pub fn ru_to_px_yf(&self, y: ScalarF4E4) -> f32 { (self.half_dims.i() + (y - self.scroll_y) * self.span * self.ru).to_f64() as f32 }
-    #[inline] pub fn ru_to_px_wf(&self, w: ScalarF4E4) -> f32 { (w * self.span * self.ru).to_f64() as f32 }
-    #[inline] pub fn ru_to_px_hf(&self, h: ScalarF4E4) -> f32 { (h * self.span * self.ru).to_f64() as f32 }
+    // Direct `to_f32()` is exact here (F4E4's fraction is narrower than f32's 24-bit mantissa),
+    // so there's no precision reason to detour through f64.
+    #[inline] pub fn ru_to_px_xf(&self, x: ScalarF4E4) -> f32 { (self.half_dims.r() + x * self.span * self.ru).to_f32() }
+    #[inline] pub fn ru_to_px_yf(&self, y: ScalarF4E4) -> f32 { (self.half_dims.i() + (y - self.scroll_y) * self.span * self.ru).to_f32() }
+    #[inline] pub fn ru_to_px_wf(&self, w: ScalarF4E4) -> f32 { (w * self.span * self.ru).to_f32() }
+    #[inline] pub fn ru_to_px_hf(&self, h: ScalarF4E4) -> f32 { (h * self.span * self.ru).to_f32() }
 }
 
 /// Text layout settings — mirrors VSF TextStyle tags.

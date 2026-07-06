@@ -69,6 +69,12 @@ impl RenderContext {
             "info"
         );
 
+        // Front-to-back (fluor under-blend): children sit on top of the parent box, so they
+        // paint FIRST; the parent fill then lands behind them.
+        for child in children {
+            self.render(child, canvas)?;
+        }
+
         match fill {
             Fill::Solid(colour) => {
                 canvas.fill_rotated_rect_ru(world_pos, world_size, rotation, colour)?;
@@ -78,10 +84,6 @@ impl RenderContext {
 
         if stroke.is_some() {
             return Err("Strokes not implemented yet".to_string());
-        }
-
-        for child in children {
-            self.render(child, canvas)?;
         }
 
         Ok(())

@@ -1741,30 +1741,13 @@ impl VM {
                     cursor: CursorKind::Pointer,
                 });
 
-                // Draw 1px hairline border (no AA — axis-aligned fast path)
+                // fluor Button — pill, AA edges, fluor theme (capsule accent colour retired)
                 let left = pos.r() - half_w;
                 let right = pos.r() + half_w;
                 let top = pos.i() - half_h;
                 let bottom = pos.i() + half_h;
-                self.canvas.stroke_rect_ru(pos, size, &colour)?;
-
-                // Draw centered label text
-                let font_key = *blake3::hash(&font_bytes).as_bytes();
-                let text_size = size.i() * 2 / 3; // 2/3 of button height
-                let text_settings = crate::drawing::TextSettings {
-                    align: 0, // center
-                    ..Default::default()
-                };
-                self.canvas.draw_text(
-                    &mut self.font_cache,
-                    font_key,
-                    &font_bytes,
-                    pos,
-                    text_size,
-                    &label,
-                    &colour,
-                    &text_settings,
-                )?;
+                let _ = &colour;
+                self.canvas.draw_widget_button(widget_id, pos, size, &label)?;
 
                 // Check if clicked this frame (mouse Y is screen-space, bounds are content-space)
                 let mut clicked = false;
@@ -1956,25 +1939,16 @@ impl VM {
                     bg_pixels, px_x, px_y, px_w, px_h,
                 });
 
-                // Draw widget content
-                let cursor_info = Self::draw_text_input_visual(
+                // Draw widget content (fluor Textbox — it owns the blinkey cursor)
+                Self::draw_text_input_visual(
                     &mut self.canvas, &mut self.font_cache,
+                    widget_id,
                     pos, size, &colour, &placeholder,
                     font_key, &font_bytes,
                     self.text_inputs.get(&widget_id).unwrap(),
                     is_focused,
                     standalone_text_size,
                 )?;
-                // Start blinkey cursor if focused
-                if let Some((cx, cy, ch)) = cursor_info {
-                    let state = self.text_inputs.get_mut(&widget_id).unwrap();
-                    state.blinkey_px_x = cx;
-                    state.blinkey_px_y = cy;
-                    state.blinkey_px_h = ch;
-                    state.blinkey_wave_top = true;
-                    self.canvas.blinkey_add_top(cx, cy, ch);
-                    state.blinkey_visible = true;
-                }
 
                 // Push current text content
                 let state = self.text_inputs.get(&widget_id).unwrap();
@@ -2379,55 +2353,9 @@ impl VM {
             row_tops.push(row_tops[row] + row_heights[row]);
         }
 
-        // Draw backgrounds
-        if !measure_only {
-            for row in 0..rows {
-                let rh = row_heights[row];
-                let row_pos = CircleF4E4::from((pos.r(), row_tops[row] + (rh >> 1usize)));
-                let row_size = CircleF4E4::from((table_width, rh));
-                if row == 0 {
-                    if let Some(ref bg) = settings.header_bg {
-                        self.canvas.fill_rect_ru(row_pos, row_size, bg)?;
-                    }
-                } else if row % 2 == 0 {
-                    if let Some(ref bg) = settings.alt_row_bg {
-                        self.canvas.fill_rect_ru(row_pos, row_size, bg)?;
-                    }
-                }
-            }
-        }
-
-        // Draw grid lines
-        if !measure_only {
-            if let (Some(ref border), Some(ref mask)) =
-                (&settings.border_colour, &settings.grid_mask)
-            {
-                for row_gap in 0..=rows {
-                    for col in 0..cols {
-                        if mask.h_segment(row_gap, col, cols) {
-                            self.canvas.hline_ru(
-                                row_tops[row_gap],
-                                col_lefts[col],
-                                col_lefts[col] + col_widths[col],
-                                border,
-                            )?;
-                        }
-                    }
-                }
-                for row in 0..rows {
-                    for col_gap in 0..=cols {
-                        if mask.v_segment(row, col_gap, cols + 1) {
-                            self.canvas.vline_ru(
-                                col_lefts[col_gap],
-                                row_tops[row],
-                                row_tops[row + 1],
-                                border,
-                            )?;
-                        }
-                    }
-                }
-            }
-        }
+        // Front-to-back draw order (fluor `under` compositing): cells first (text/widgets are the
+        // frontmost layer), then grid lines behind them, then row backgrounds behind everything.
+        // The photon noise backdrop lands last of all, in Canvas::to_rgba_bytes.
 
         // Draw cells (skip when measuring only)
         let mut widget_results: Vec<VsfType> = Vec::new();
@@ -2550,23 +2478,9 @@ impl VM {
                                 bg_pixels, px_x, px_y, px_w, px_h,
                             });
 
-                            self.canvas.stroke_rect_ru(cell_center, btn_size, colour)?;
-                            let text_size = size;
-                            let text_settings = crate::drawing::TextSettings {
-                                align: 0,
-                                wrap: Some(padded_w),
-                                ..Default::default()
-                            };
-                            self.canvas.draw_text(
-                                &mut self.font_cache,
-                                font_key,
-                                font_bytes,
-                                cell_center,
-                                text_size,
-                                label,
-                                colour,
-                                &text_settings,
-                            )?;
+                            // fluor Button — pill + AA + fluor theme (capsule accent colour retired)
+                            let _ = colour;
+                            self.canvas.draw_widget_button(widget_id, cell_center, btn_size, label)?;
 
                             let mut clicked = false;
                             for event in &self.events {
@@ -2717,23 +2631,15 @@ impl VM {
                                 text_size: size,
                                 bg_pixels, px_x, px_y, px_w, px_h,
                             });
-                            let cursor_info = Self::draw_text_input_visual(
+                            Self::draw_text_input_visual(
                                 &mut self.canvas, &mut self.font_cache,
+                                widget_id,
                                 cell_center, input_size, colour, placeholder,
                                 font_key, font_bytes,
                                 self.text_inputs.get(&widget_id).unwrap(),
                                 is_focused,
                                 size,
                             )?;
-                            if let Some((cx, cy, ch)) = cursor_info {
-                                let state = self.text_inputs.get_mut(&widget_id).unwrap();
-                                state.blinkey_px_x = cx;
-                                state.blinkey_px_y = cy;
-                                state.blinkey_px_h = ch;
-                                state.blinkey_wave_top = true;
-                                self.canvas.blinkey_add_top(cx, cy, ch);
-                                state.blinkey_visible = true;
-                            }
 
                             let result_text = self.text_inputs.get(&widget_id).unwrap().text();
                             widget_results.push(VsfType::x(result_text));
@@ -2785,6 +2691,56 @@ impl VM {
                             // Sub-table widget results bubble up
                             widget_results.extend(sub_result.widget_results);
                         }
+                    }
+                }
+            }
+        }
+
+        // Draw grid lines — behind the cell text/widgets painted above (fluor under-blend)
+        if !measure_only {
+            if let (Some(ref border), Some(ref mask)) =
+                (&settings.border_colour, &settings.grid_mask)
+            {
+                for row_gap in 0..=rows {
+                    for col in 0..cols {
+                        if mask.h_segment(row_gap, col, cols) {
+                            self.canvas.hline_ru(
+                                row_tops[row_gap],
+                                col_lefts[col],
+                                col_lefts[col] + col_widths[col],
+                                border,
+                            )?;
+                        }
+                    }
+                }
+                for row in 0..rows {
+                    for col_gap in 0..=cols {
+                        if mask.v_segment(row, col_gap, cols + 1) {
+                            self.canvas.vline_ru(
+                                col_lefts[col_gap],
+                                row_tops[row],
+                                row_tops[row + 1],
+                                border,
+                            )?;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Draw backgrounds — the backmost table layer, behind text and grid
+        if !measure_only {
+            for row in 0..rows {
+                let rh = row_heights[row];
+                let row_pos = CircleF4E4::from((pos.r(), row_tops[row] + (rh >> 1usize)));
+                let row_size = CircleF4E4::from((table_width, rh));
+                if row == 0 {
+                    if let Some(ref bg) = settings.header_bg {
+                        self.canvas.fill_rect_ru(row_pos, row_size, bg)?;
+                    }
+                } else if row % 2 == 0 {
+                    if let Some(ref bg) = settings.alt_row_bg {
+                        self.canvas.fill_rect_ru(row_pos, row_size, bg)?;
                     }
                 }
             }
@@ -3411,120 +3367,35 @@ impl VM {
 
     /// Draw a text input widget's visual content (border + text + cursor).
     /// Shared between full render and differential rerender.
+    /// Paint a text input via the fluor `Textbox` widget (pill, AA edges, focus glow, wave
+    /// blinkey). The VM's `TextInputState` stays the source of truth for content/cursor; the
+    /// widget renders it. The blinkey is owned by the widget — `Canvas::flip_textbox_blinkey`
+    /// animates it, so this never returns cursor coordinates (the old hand-rolled path did).
+    #[allow(clippy::too_many_arguments)]
     fn draw_text_input_visual(
         canvas: &mut Canvas,
-        font_cache: &mut FontCache,
+        _font_cache: &mut FontCache,
+        widget_id: u32,
         pos: CircleF4E4,
         size: CircleF4E4,
-        colour: &VsfType,
+        _colour: &VsfType,
         placeholder: &str,
-        font_key: [u8; 32],
-        font_bytes: &[u8],
+        _font_key: [u8; 32],
+        _font_bytes: &[u8],
         state: &TextInputState,
         is_focused: bool,
         text_size: ScalarF4E4,
     ) -> Result<Option<(usize, usize, usize)>, String> {
-        // Draw 1px hairline border
-        canvas.stroke_rect_ru(pos, size, colour)?;
-
-        // Text content or placeholder (placeholder only when unfocused and empty)
-        let show_placeholder = !is_focused && state.chars.is_empty();
-        let display_text = if show_placeholder {
-            placeholder.to_string()
-        } else {
-            state.text()
-        };
-        let half_w = size.r() >> 1usize;
-        let half_h = size.i() >> 1usize;
-        let left = pos.r() - half_w;
-        let padding = text_size / 4;
-        let wrap_w = size.r() - (padding << 1usize);
-        let text_pos = CircleF4E4::from((left + padding, pos.i()));
-
-        let display_colour = if show_placeholder {
-            VsfType::ra([128, 128, 128, 255])
-        } else {
-            colour.clone()
-        };
-        let text_settings = crate::drawing::TextSettings {
-            align: 1, // left-align
-            wrap: Some(wrap_w),
-            ..Default::default()
-        };
-        canvas.draw_text(
-            font_cache, font_key, font_bytes,
-            text_pos, text_size, &display_text, &display_colour, &text_settings,
+        canvas.draw_widget_textbox(
+            widget_id,
+            pos,
+            size,
+            text_size,
+            &state.text(),
+            state.cursor_pos,
+            is_focused,
+            placeholder,
         )?;
-
-        // Compute cursor pixel position (for blinkey — caller manages add/subtract)
-        if is_focused {
-            let cursor_text: String = state.chars[..state.cursor_pos].iter().collect();
-            let font = font_cache.get(&font_key);
-            if let Some(font) = font {
-                use fontdue::{layout::*, Font as FontdueFont};
-                let span_ru = canvas.span() * canvas.ru();
-                let px = text_size * span_ru;
-                let wrap_px = wrap_w * span_ru;
-                let anchor_x_px = ScalarF4E4::from(canvas.ru_to_px_x(left + padding));
-                let anchor_y_px = ScalarF4E4::from(canvas.ru_to_px_y(pos.i()));
-
-                // Layout full display text to compute vertical centering shift
-                // (must match draw_text's shift_y calculation)
-                let full_text = &display_text;
-                let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
-                layout.reset(&LayoutSettings {
-                    x: anchor_x_px,
-                    y: anchor_y_px,
-                    max_width: Some(wrap_px),
-                    horizontal_align: HorizontalAlign::Left,
-                    line_height: ScalarF4E4::ONE,
-                    ..LayoutSettings::default()
-                });
-                layout.append(
-                    &[font as &FontdueFont],
-                    &TextStyle::new(full_text, px, 0),
-                );
-                let full_glyphs = layout.glyphs();
-                let shift_y = if full_glyphs.is_empty() {
-                    ScalarF4E4::ZERO
-                } else {
-                    let mut min_y = full_glyphs[0].y;
-                    let mut max_y = full_glyphs[0].y + full_glyphs[0].height;
-                    for g in full_glyphs.iter().skip(1) {
-                        if g.y < min_y { min_y = g.y; }
-                        let bottom = g.y + g.height;
-                        if bottom > max_y { max_y = bottom; }
-                    }
-                    let actual_h = max_y - min_y;
-                    anchor_y_px - (actual_h >> 1usize) - min_y
-                };
-
-                // Now layout cursor text with same settings to find cursor position
-                layout.reset(&LayoutSettings {
-                    x: anchor_x_px,
-                    y: anchor_y_px,
-                    max_width: Some(wrap_px),
-                    horizontal_align: HorizontalAlign::Left,
-                    line_height: ScalarF4E4::ONE,
-                    ..LayoutSettings::default()
-                });
-                layout.append(
-                    &[font as &FontdueFont],
-                    &TextStyle::new(&cursor_text, px, 0),
-                );
-                let glyphs = layout.glyphs();
-                let (cursor_x_px, cursor_y_px) = if glyphs.is_empty() {
-                    (anchor_x_px, anchor_y_px + shift_y)
-                } else {
-                    let last = &glyphs[glyphs.len() - 1];
-                    (last.x + last.width, last.y + shift_y)
-                };
-                let cursor_px_x = cursor_x_px.to_i32().max(0) as usize;
-                let cursor_px_y = cursor_y_px.to_i32().max(0) as usize;
-                let line_h_px = (px + px / 4u8).to_i32().max(2) as usize;
-                return Ok(Some((cursor_px_x, cursor_px_y, line_h_px)));
-            }
-        }
         Ok(None)
     }
 
@@ -3629,37 +3500,20 @@ impl VM {
         let snapshots = std::mem::take(&mut self.widget_snapshots);
         for snap in &snapshots {
             if let WidgetSnapshotKind::TextInput { ref placeholder } = snap.kind {
-                // Stop existing blinkey before restoring background
-                if let Some(state) = self.text_inputs.get(&snap.widget_id) {
-                    if state.blinkey_visible {
-                        if state.blinkey_wave_top {
-                            self.canvas.blinkey_sub_top(state.blinkey_px_x, state.blinkey_px_y, state.blinkey_px_h);
-                        } else {
-                            self.canvas.blinkey_sub_bottom(state.blinkey_px_x, state.blinkey_px_y, state.blinkey_px_h);
-                        }
-                        self.text_inputs.get_mut(&snap.widget_id).unwrap().blinkey_visible = false;
-                    }
-                }
-                // Restore background pixels, then redraw with current state
+                // Restore background pixels, then redraw with current state. The fluor Textbox
+                // owns the blinkey (drawn inside draw_text_input_visual when focused), so no
+                // separate wave add/sub bookkeeping here.
                 self.canvas.restore_region(&snap.bg_pixels, snap.px_x, snap.px_y, snap.px_w, snap.px_h);
                 let is_focused = self.focused_widget == Some(snap.widget_id);
                 if let Some(state) = self.text_inputs.get(&snap.widget_id) {
-                    let cursor_info = Self::draw_text_input_visual(
+                    Self::draw_text_input_visual(
                         &mut self.canvas, &mut self.font_cache,
+                        snap.widget_id,
                         snap.pos, snap.size, &snap.colour, placeholder,
                         snap.font_key, &snap.font_bytes,
                         state, is_focused,
                         snap.text_size,
                     )?;
-                    if let Some((cx, cy, ch)) = cursor_info {
-                        let state = self.text_inputs.get_mut(&snap.widget_id).unwrap();
-                        state.blinkey_px_x = cx;
-                        state.blinkey_px_y = cy;
-                        state.blinkey_px_h = ch;
-                        state.blinkey_wave_top = true;
-                        self.canvas.blinkey_add_top(cx, cy, ch);
-                        state.blinkey_visible = true;
-                    }
                 }
             }
             // Buttons: skip — they don't change on keystrokes, full rerun handles clicks
@@ -3672,20 +3526,9 @@ impl VM {
     /// Flip the blinkey cursor animation — called by JS on a timer.
     /// Subtracts current wave, adds opposite wave. No background restore needed.
     pub fn flip_blinkey(&mut self) {
+        // The fluor Textbox owns the cursor: restore the saved strip, alternate the wave, repaint.
         if let Some(focused_id) = self.focused_widget {
-            if let Some(state) = self.text_inputs.get_mut(&focused_id) {
-                if !state.blinkey_visible { return; }
-                let (px_x, px_y, px_h) = (state.blinkey_px_x, state.blinkey_px_y, state.blinkey_px_h);
-                if state.blinkey_wave_top {
-                    self.canvas.blinkey_sub_top(px_x, px_y, px_h);
-                    self.canvas.blinkey_add_bottom(px_x, px_y, px_h);
-                    state.blinkey_wave_top = false;
-                } else {
-                    self.canvas.blinkey_sub_bottom(px_x, px_y, px_h);
-                    self.canvas.blinkey_add_top(px_x, px_y, px_h);
-                    state.blinkey_wave_top = true;
-                }
-            }
+            self.canvas.flip_textbox_blinkey(focused_id);
         }
     }
 
