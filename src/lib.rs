@@ -186,6 +186,32 @@ pub mod wasm {
             self.vm.canvas_mut().to_rgba_bytes()
         }
 
+        /// Drain the resource keys the last render couldn't resolve, as a JS string array. For each,
+        /// the host builds a VSF request (`build_resource_request`), POSTs it, and returns the bytes
+        /// via `provide_resource`, then re-renders. Empty array = nothing to fetch (converged).
+        pub fn take_pending_requests(&mut self) -> Vec<String> {
+            self.vm.take_pending_requests()
+        }
+
+        /// Build the VSF-framed request the host POSTs to the worker for one resource `key`. VSF
+        /// construction stays in wasm so the host only shuttles opaque bytes over the wire.
+        pub fn build_resource_request(&self, key: &str) -> Vec<u8> {
+            vsf::vsf_builder::VsfBuilder::new()
+                .provenance_only()
+                .add_section(
+                    "resource_get",
+                    vec![("key".to_string(), vsf::types::VsfType::a(key.to_string()))],
+                )
+                .build()
+                .unwrap_or_default()
+        }
+
+        /// Hand back a fetched resource: `key` is the request key, `vsf_bytes` the worker's VSF
+        /// response (a VSF image file). Stored raw; decoded on the next draw_image that needs it.
+        pub fn provide_resource(&mut self, key: String, vsf_bytes: Vec<u8>) {
+            self.vm.provide_resource(key, vsf_bytes);
+        }
+
         /// Get canvas width in pixels
         pub fn width(&self) -> usize {
             self.vm.canvas().width()

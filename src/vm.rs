@@ -348,6 +348,8 @@ pub struct VM {
 /// Cell content types for table rendering (text, buttons, text inputs, sub-tables)
 enum CellContent {
     Text(String),
+    /// Async image cell — the resource key `draw_image` resolves against the VM resource table.
+    Image(String),
     Styled(String, VsfType, Option<ScalarF4E4>),
     Button {
         label: String,
@@ -480,6 +482,19 @@ impl VM {
     fn draw_image_placeholder(&mut self, pos: CircleF4E4, size: CircleF4E4) -> Result<(), String> {
         let dim = VsfType::ra([48, 48, 48, 200]);
         self.canvas.fill_rect_ru(pos, size, &dim)
+    }
+
+    /// Drain the resource keys the last render wanted but couldn't resolve. The host fetches each
+    /// over the VSF wire and feeds the bytes back via `provide_resource`, then re-renders.
+    pub fn take_pending_requests(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.pending_requests)
+    }
+
+    /// Hand the VM a fetched resource's VSF bytes, keyed by the request key. Stored raw; decoded
+    /// lazily on the next `draw_image` that needs it. Overwrites any prior state for the key
+    /// (so a re-fetch replaces a `Failed`/`Pending` entry).
+    pub fn provide_resource(&mut self, key: String, vsf_bytes: Vec<u8>) {
+        self.resources.insert(key, ResourceState::Bytes(vsf_bytes));
     }
 
     /// Reset VM state to re-execute bytecode from the beginning
@@ -1241,6 +1256,10 @@ impl VM {
                                 for _ in 0..count {
                                     let cell = match self.pop()? {
                                         VsfType::x(s) | VsfType::a(s) => CellContent::Text(s),
+                                        VsfType::v(b'i', bytes) => {
+                                            // Image cell: v-wrapped 'i' carries the resource key (UTF-8).
+                                            CellContent::Image(String::from_utf8_lossy(&bytes).into_owned())
+                                        }
                                         colour @ VsfType::ra(_) => {
                                             // Styled text: colour on top, then optional s44 size, then text
                                             let next = self.pop()?;
@@ -1370,6 +1389,12 @@ impl VM {
                                                             colour: *colour.clone(),
                                                             id,
                                                         });
+                                                    }
+                                                    VsfType::v(b'i', bytes) => {
+                                                        // Image cell: v-wrapped 'i' carries the resource key (UTF-8).
+                                                        sub_cells.push(CellContent::Image(
+                                                            String::from_utf8_lossy(bytes).into_owned(),
+                                                        ));
                                                     }
                                                     VsfType::roa(..) => {
                                                         // Nested sub-table placeholder (depth limit TODO)
@@ -2271,7 +2296,9 @@ impl VM {
                         CellContent::Text(s) | CellContent::Styled(s, _, _) => s.as_str(),
                         CellContent::Button { label, .. } => label.as_str(),
                         CellContent::TextInput { placeholder, .. } => placeholder.as_str(),
-                        CellContent::SubTable { .. } => "",
+                        // Image fills its cell (square, sized by the VM); no text to measure, so it
+                        // contributes no intrinsic column width — set the column via col_widths.
+                        CellContent::Image(_) | CellContent::SubTable { .. } => "",
                     };
                     let font = self.font_cache.get(&font_key).unwrap();
                     // Measure each line independently to handle \n correctly
@@ -2529,6 +2556,19 @@ impl VM {
                                 cell_colour,
                                 &text_settings,
                             )?;
+                        }
+
+                        CellContent::Image(key) => {
+                            // Square icon sized to the smaller padded cell dimension, centred in the
+                            // cell. draw_image blits the decoded avatar or a placeholder + queues the
+                            // fetch. cell_center/padded_* are the same rects the text arm uses.
+                            let side = if padded_w.to_f32() <= padded_h.to_f32() {
+                                padded_w
+                            } else {
+                                padded_h
+                            };
+                            let size = CircleF4E4::from((side, side));
+                            self.draw_image(key.clone(), cell_center, size)?;
                         }
 
                         CellContent::Button {

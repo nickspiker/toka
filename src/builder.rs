@@ -27,6 +27,12 @@ use vsf::types::{ButtonVariant, VsfType};
 pub enum CellData<'a> {
     /// Plain text cell
     Text(&'a str),
+    /// Async image cell — the VM resolves `key` against its resource table (fetch-at-render),
+    /// blitting the decoded pixels or a placeholder. Sized square to the cell by the VM.
+    Image {
+        /// Resource key (e.g. an avatar storage key) the host fetches over the VSF wire.
+        key: &'a str,
+    },
     /// Text cell with custom colour and optional size override
     Styled {
         /// Cell text content
@@ -104,6 +110,10 @@ fn build_roa_from_cell_data(
         for cell in *row {
             match cell {
                 CellData::Text(s) => children.push(VsfType::a(s.to_string())),
+                CellData::Image { key } => {
+                    // v-wrapped 'i' → the VM parses this cell as CellContent::Image(key).
+                    children.push(VsfType::v(b'i', key.as_bytes().to_vec()));
+                }
                 CellData::Styled { text: s, colour, size: sz } => {
                     // Encode as: text (l), optional size (s44), colour (ra)
                     // VM parser pops: colour first, then optional s44, then text
@@ -1305,6 +1315,12 @@ impl Program {
                 match cell {
                     CellData::Text(s) => {
                         self = self.ps_str(s);
+                    }
+                    CellData::Image { key } => {
+                        // Push v-wrapped 'i' with the key → VM parses CellContent::Image.
+                        emit_op(&mut self.bytecode, b'p', b's');
+                        self.bytecode
+                            .extend_from_slice(&VsfType::v(b'i', key.as_bytes().to_vec()).flatten());
                     }
                     CellData::Styled { text, colour, size: sz } => {
                         // Push: text, then optional size, then colour on top
