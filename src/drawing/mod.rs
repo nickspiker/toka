@@ -177,6 +177,22 @@ impl Canvas {
         Ok(())
     }
 
+    /// Blit a decoded image (α + darkness pixels, row-major `src_w × src_h`) scaled into the RU
+    /// rect at `pos` with `size`. Mirrors `fill_rect_ru`'s RU→px + FCanvas plumbing; the scale +
+    /// UNDER-composite live in `paint::draw_image`.
+    pub fn blit_image_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, src: &[u32], src_w: usize, src_h: usize) -> Result<(), String> {
+        let cx = self.coords.ru_to_px_xf(pos.r());
+        let cy = self.coords.ru_to_px_yf(pos.i());
+        let w = self.coords.ru_to_px_wf(size.r());
+        let h = self.coords.ru_to_px_hf(size.i());
+        let clip = self.clip();
+        let (bw, bh) = (self.coords.width, self.coords.height);
+        let mut dmg = Damage::new();
+        let mut fc = FCanvas::new(&mut self.pixels, bw, bh, &mut dmg);
+        paint::draw_image(&mut fc, src, src_w, src_h, cx, cy, w, h, clip);
+        Ok(())
+    }
+
     /// 1px horizontal line at RU `y` from `x0` to `x1` — a zero-height rect (fluor's line convention).
     /// Centre on the pixel row for a crisp rule (`+0.5` = pixel centre).
     pub fn hline_ru(&mut self, y: ScalarF4E4, x0: ScalarF4E4, x1: ScalarF4E4, colour: &vsf::VsfType) -> Result<(), String> {

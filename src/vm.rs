@@ -29,6 +29,18 @@ use std::collections::HashMap;
 
 /// Cache of parsed fonts keyed by BLAKE3 hash of the font file bytes
 pub type FontCache = HashMap<[u8; 32], FontdueFont>;
+
+/// State of an async resource in the VM's resource table (see `Vm::draw_image`).
+enum ResourceState {
+    /// Requested from the host, not yet delivered — draw a placeholder.
+    Pending,
+    /// VSF bytes delivered by the host, decoded lazily on the next `draw_image`.
+    Bytes(Vec<u8>),
+    /// Decoded α + darkness pixels, ready to blit (`w × h`, row-major).
+    Decoded { w: usize, h: usize, pixels: Vec<u32> },
+    /// Delivered bytes failed to decode — placeholder, never retried.
+    Failed,
+}
 // Note: We use VSF RGB directly, NOT sRGB conversion
 // WASM wrapper handles sRGB conversion on Chrome/browser side
 use vsf::decoding::parse::parse as vsf_parse;
@@ -310,6 +322,16 @@ pub struct VM {
     /// Persistent text input state keyed by widget ID
     text_inputs: HashMap<u32, TextInputState>,
 
+    /// Async resource table keyed by resource key (e.g. an avatar storage key). `draw_image`
+    /// resolves against this: `Decoded` blits, `Bytes` decodes-then-blits, anything else draws a
+    /// placeholder and (if unseen) records the key in `pending_requests`. Persists across resize
+    /// so a resolved avatar survives a reflow without re-fetching.
+    resources: HashMap<String, ResourceState>,
+
+    /// Resource keys a render wanted but couldn't resolve — drained by the host via
+    /// `take_pending_requests`, fetched over the VSF wire, and fed back via `provide_resource`.
+    pending_requests: Vec<String>,
+
     /// Which widget has focus (receives keyboard events)
     focused_widget: Option<u32>,
 
@@ -390,6 +412,8 @@ impl VM {
             events: Vec::new(),
             hit_regions: Vec::new(),
             text_inputs: HashMap::new(),
+            resources: HashMap::new(),
+            pending_requests: Vec::new(),
             focused_widget: None,
             mouse_down: false,
             actions: Vec::new(),
@@ -411,6 +435,51 @@ impl VM {
             Canvas::new_fast(width, height)
         };
         // font_cache, text_inputs, focused_widget, events all preserved
+    }
+
+    /// Resolve a `draw_image` key against the resource table and blit it, else record a pending
+    /// host request and draw a placeholder. Host-delivered `Bytes` are decoded to `Decoded` lazily
+    /// here, on the first draw that needs them, so decode cost is paid once and off the fetch path.
+    fn draw_image(
+        &mut self,
+        key: String,
+        pos: CircleF4E4,
+        size: CircleF4E4,
+    ) -> Result<(), String> {
+        // Lazily decode bytes the host delivered (remove → decode → reinsert, so no borrow lingers).
+        if matches!(self.resources.get(&key), Some(ResourceState::Bytes(_))) {
+            if let Some(ResourceState::Bytes(bytes)) = self.resources.remove(&key) {
+                let state = match vsf::image::decode(&bytes) {
+                    Ok(img) => ResourceState::Decoded {
+                        w: img.width as usize,
+                        h: img.height as usize,
+                        pixels: img.pixels,
+                    },
+                    Err(_) => ResourceState::Failed,
+                };
+                self.resources.insert(key.clone(), state);
+            }
+        }
+
+        // Ready → blit. `pixels` borrows `resources`; `canvas` is a disjoint field, so this is fine,
+        // and the early return keeps the borrow from outliving the call.
+        if let Some(ResourceState::Decoded { w, h, pixels }) = self.resources.get(&key) {
+            return self.canvas.blit_image_ru(pos, size, pixels, *w, *h);
+        }
+
+        // Not ready → request it once, then draw the placeholder (all borrows released above).
+        if !self.resources.contains_key(&key) {
+            self.resources.insert(key.clone(), ResourceState::Pending);
+            self.pending_requests.push(key);
+        }
+        self.draw_image_placeholder(pos, size)
+    }
+
+    /// Dim placeholder occupying the same rect the image will fill, so nothing shifts when it
+    /// resolves. α + darkness dim grey.
+    fn draw_image_placeholder(&mut self, pos: CircleF4E4, size: CircleF4E4) -> Result<(), String> {
+        let dim = VsfType::ra([48, 48, 48, 200]);
+        self.canvas.fill_rect_ru(pos, size, &dim)
     }
 
     /// Reset VM state to re-execute bytecode from the beginning
@@ -978,6 +1047,29 @@ impl VM {
                     &colour,
                     &settings,
                 )?;
+            }
+
+            Opcode::draw_image => {
+                // Stack (bottom→top): key (string), pos (c44), size (c44)
+                let size = match self.pop()? {
+                    VsfType::c44(c) => c,
+                    other => {
+                        return Err(format!("draw_image: expected c44 for size, got {:?}", other))
+                    }
+                };
+                let pos = match self.pop()? {
+                    VsfType::c44(c) => c,
+                    other => {
+                        return Err(format!("draw_image: expected c44 for pos, got {:?}", other))
+                    }
+                };
+                let key = match self.pop()? {
+                    VsfType::x(s) | VsfType::a(s) => s,
+                    other => {
+                        return Err(format!("draw_image: expected string for key, got {:?}", other))
+                    }
+                };
+                self.draw_image(key, pos, size)?;
             }
 
             Opcode::draw_line => {

@@ -311,6 +311,12 @@ pub enum Opcode {
     /// VSF: {tb}
     draw_table,
 
+    /// Draw image: pop size (c44), pos (c44), key (string). The VM resolves `key` against its
+    /// resource table — blits the decoded pixels if present, else records the key as a pending
+    /// host request and draws a placeholder. See `Vm::draw_image` / the resource-fetch effect.
+    /// VSF: {di}
+    draw_image,
+
     // ==================== CONTROL FLOW ====================
     /// Call function at bytecode offset
     /// VSF: {cn}[offset:u]
@@ -530,6 +536,7 @@ impl Opcode {
             0x6474 => Some(Self::draw_text),     // dt
             0x646c => Some(Self::draw_line),     // dl
             0x7462 => Some(Self::draw_table),    // tb
+            0x6469 => Some(Self::draw_image),    // di
 
             // Control flow
             0x636e => Some(Self::call),          // cn
@@ -675,6 +682,7 @@ impl Opcode {
             Self::draw_text => *b"dt",
             Self::draw_line => *b"dl",
             Self::draw_table => *b"tb",
+            Self::draw_image => *b"di",
             Self::call => *b"cn",
             Self::return_ => *b"re",
             Self::return_value => *b"rv",
