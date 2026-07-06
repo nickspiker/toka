@@ -124,6 +124,33 @@ function render() {
     }
 }
 
+// Fetch-at-render: drain the resource keys the VM couldn't resolve (e.g. avatar keys behind
+// draw_image), fetch each over the VSF wire, hand the bytes back, then re-run + repaint so they
+// blit. The VM builds/parses the VSF; this loop just shuttles opaque bytes. Bounded rounds guard
+// against a capsule that keeps surfacing new keys. Fire-and-forget — it repaints itself.
+async function resolveResources() {
+    if (!currentVM) return;
+    for (let round = 0; round < 4; round++) {
+        const pending = currentVM.take_pending_requests();
+        if (!pending || pending.length === 0) return;
+        await Promise.all(pending.map(async (key) => {
+            try {
+                const req = currentVM.build_resource_request(key);
+                const resp = await fetch('/resource_get', { method: 'POST', body: req });
+                if (!resp.ok) return;
+                const bytes = new Uint8Array(await resp.arrayBuffer());
+                currentVM.provide_resource(key, bytes);
+            } catch (err) {
+                log(`resource fetch failed for ${key}: ${err.message}`, 'error');
+            }
+        }));
+        // Re-run + repaint so the newly-provided resources decode and blit in place.
+        currentVM.reset();
+        while (currentVM.run(256)) {}
+        render();
+    }
+}
+
 // Setup canvas
 function setupCanvas() {
     canvas = document.getElementById('canvas');
@@ -318,6 +345,7 @@ function reactiveRender() {
 
             currentVM.drain_events();
             render();
+            resolveResources(); // async: fetch any draw_image resources (avatars), then repaint
             log('Rendered successfully', 'info');
         } catch (err) {
             log(`VM execution error: ${err}`, 'error');
