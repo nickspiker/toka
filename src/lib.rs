@@ -422,19 +422,22 @@ pub mod wasm {
         pub fn cursor_at(&self, x: f64, y: f64) -> String {
             let sx = ScalarF4E4::from_f64(x);
             let sy = ScalarF4E4::from_f64(y);
-            match self.vm.hit_test(sx, sy) {
-                Some(region) => match region.cursor {
-                    crate::vm::CursorKind::Default => "default".to_string(),
-                    crate::vm::CursorKind::Pointer => "pointer".to_string(),
-                    crate::vm::CursorKind::Text => "text".to_string(),
-                },
-                None => "default".to_string(),
+            match self.vm.cursor_kind_at(sx, sy) {
+                crate::vm::CursorKind::Default => "default".to_string(),
+                crate::vm::CursorKind::Pointer => "pointer".to_string(),
+                crate::vm::CursorKind::Text => "text".to_string(),
             }
         }
 
         /// Get the focused widget ID (or -1 if none)
         pub fn focused_widget(&self) -> i32 {
             self.vm.focused_widget().map(|id| id as i32).unwrap_or(-1)
+        }
+
+        /// Get the hovered widget ID (or -1 if none). The host polls this after `set_mouse` to
+        /// decide whether a hover repaint (differential) is needed.
+        pub fn hovered_widget(&self) -> i32 {
+            self.vm.hovered_widget().map(|id| id as i32).unwrap_or(-1)
         }
 
         /// Set mouse position (in RU) — for cursor tracking

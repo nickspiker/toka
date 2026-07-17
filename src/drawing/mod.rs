@@ -20,6 +20,7 @@ pub use shared::RuCoords;
 pub use shared::{BlendMode, LineSettings, TableSettings, TextSettings};
 
 use crate::vm::FontCache;
+use fluor::text::TextStyle;
 use shared::RuCoords as Coords;
 use spirix::{CircleF4E4, ScalarF4E4};
 use std::collections::HashMap;
@@ -48,9 +49,14 @@ pub struct Canvas {
     /// caches survive and (for textboxes) blinkey/scroll state carries over.
     buttons: HashMap<u32, FButton>,
     textboxes: HashMap<u32, FTextbox>,
-    /// Dense fluor hit-id allocator for the widgets above (toka routes hits itself via RU
-    /// hit_regions, so these ids are only used for fluor's internal hover bookkeeping).
+    /// Dense fluor hit-id allocator for the widgets above (unused for routing now — see `hit_map`).
     hit_counter: HitId,
+    /// Per-pixel widget silhouette map, parallel to `pixels`. Each interactive widget stamps its
+    /// VM widget id (cast to `HitId`) here as fluor paints its true pill/textbox silhouette, so
+    /// `hit_map[y*w + x]` is the source of truth for "what's under this pixel" — the same model the
+    /// desktop/Photon fluor host uses. `0` = nothing. Cleared within the clip band each frame and
+    /// shifted alongside `pixels` on scroll, so a scrolled widget's hit region rides with its pixels.
+    hit_map: Vec<HitId>,
     /// Saved cursor-strip pixels per focused textbox: (pixels, x, y, w, h). Captured after the
     /// textbox content renders but before the blinkey wave, so a blink flip can restore the
     /// strip and repaint the alternate wave without a full frame rerun.
@@ -84,6 +90,7 @@ impl Canvas {
             buttons: HashMap::new(),
             textboxes: HashMap::new(),
             hit_counter: 1,
+            hit_map: vec![0; width * height],
             cursor_snaps: HashMap::new(),
         }
     }
@@ -130,6 +137,8 @@ impl Canvas {
         let y0 = self.coords.clip_y_min;
         let y1 = self.coords.clip_y_max;
         self.pixels[y0 * w..y1 * w].fill(EMPTY);
+        // Widget silhouettes are re-stamped as widgets repaint this frame — clear the same band.
+        self.hit_map[y0 * w..y1 * w].fill(0);
         // Frame reset: cursor snapshots reference the old frame's pixels.
         self.cursor_snaps.clear();
         Ok(())
@@ -362,9 +371,9 @@ impl Canvas {
             if line.is_empty() { continue; }
             let ly = cy - (n as f32 - 1.0 - 2.0 * i as f32) * line_h * 0.5;
             match settings.align {
-                1 => { engine.draw_text_left_u32(&mut fc, line, cx, ly, px, weight, c, &family, clip, None, None); }
-                2 => { engine.draw_text_right_u32(&mut fc, line, cx, ly, px, weight, c, &family, clip, None, None); }
-                _ => { engine.draw_text_center_u32(&mut fc, line, cx, ly, px, weight, c, &family, clip, None, None); }
+                1 => { engine.draw_text_left(&mut fc, line, cx, ly, &TextStyle::new(px, c).weight(weight).font(&family), clip, None); }
+                2 => { engine.draw_text_right(&mut fc, line, cx, ly, &TextStyle::new(px, c).weight(weight).font(&family), clip, None); }
+                _ => { engine.draw_text_center(&mut fc, line, cx, ly, &TextStyle::new(px, c).weight(weight).font(&family), clip, None); }
             }
         }
         Ok(())
@@ -379,13 +388,23 @@ impl Canvas {
         let w = self.coords.width;
         let d = delta_y.unsigned_abs().min(h);
         if d == 0 { return; }
-        if d >= h { self.pixels.fill(EMPTY); return; }
+        if d >= h {
+            self.pixels.fill(EMPTY);
+            self.hit_map.fill(0);
+            return;
+        }
+        // Shift the hit_map in lockstep with the pixels so a widget's hit region rides along with
+        // its silhouette; the exposed strip is re-stamped by the clipped rerun that follows.
         if delta_y > 0 {
             self.pixels.copy_within(d * w..h * w, 0);
             self.pixels[((h - d) * w)..].fill(EMPTY);
+            self.hit_map.copy_within(d * w..h * w, 0);
+            self.hit_map[((h - d) * w)..].fill(0);
         } else {
             self.pixels.copy_within(0..(h - d) * w, d * w);
             self.pixels[..d * w].fill(EMPTY);
+            self.hit_map.copy_within(0..(h - d) * w, d * w);
+            self.hit_map[..d * w].fill(0);
         }
     }
 
@@ -402,6 +421,7 @@ impl Canvas {
             buttons: HashMap::new(),
             textboxes: HashMap::new(),
             hit_counter: 1,
+            hit_map: vec![0; self.coords.width * self.coords.height],
             cursor_snaps: HashMap::new(),
         }
     }
@@ -458,12 +478,40 @@ impl Canvas {
         }
     }
 
+    // ── Hit-testing (per-pixel silhouette map) ──────────────────────────
+
+    /// Sample the widget silhouette map at a pixel. `0` = nothing interactive under that pixel.
+    pub fn hit_at_px(&self, px_x: usize, px_y: usize) -> HitId {
+        if px_x >= self.coords.width || px_y >= self.coords.height {
+            return 0;
+        }
+        self.hit_map[px_y * self.coords.width + px_x]
+    }
+
+    /// Resolve a screen-space RU point (center-origin, scroll NOT baked in — exactly what the host
+    /// delivers from `pageToRU`) to the widget id stamped under it, or `None`. Goes straight to
+    /// screen pixel space and samples `hit_map`, so there's no scroll/rect arithmetic to drift and
+    /// the hit matches the pixels actually on screen.
+    pub fn hit_at_screen_ru(&self, x: ScalarF4E4, y: ScalarF4E4) -> Option<u32> {
+        let px = self.coords.ru_to_px_x(x); // x axis carries no scroll term
+        let py = self.coords.ru_to_px_y_screen(y);
+        if px < 0 || py < 0 {
+            return None;
+        }
+        match self.hit_at_px(px as usize, py as usize) {
+            0 => None,
+            id => Some(id as u32),
+        }
+    }
+
     // ── fluor widgets (buttons / textboxes) ─────────────────────────────
 
     /// Paint a fluor `Button` for VM widget `id` at the RU rect. Widget state (pill/text caches)
-    /// persists across frames keyed by id. toka routes hits itself via RU hit_regions; the fluor
-    /// hit id is only for the widget's internal bookkeeping.
-    pub fn draw_widget_button(&mut self, id: u32, pos: CircleF4E4, size: CircleF4E4, label: &str) -> Result<(), String> {
+    /// persists across frames keyed by id. As fluor paints the pill it stamps `id` into `hit_map`
+    /// at every silhouette pixel — that map is the hit-test source of truth (see [`Self::hit_at_px`]).
+    /// `fill` overrides the resting pill colour (`None` = fluor's default theme fill); `hovered` /
+    /// `pressed` fold the state colour into the baked fill (headless mode — no host overlay pass).
+    pub fn draw_widget_button(&mut self, id: u32, pos: CircleF4E4, size: CircleF4E4, label: &str, fill: Option<u32>, hovered: bool, pressed: bool) -> Result<(), String> {
         let cx = self.coords.ru_to_px_xf(pos.r());
         let cy = self.coords.ru_to_px_yf(pos.i());
         let w = self.coords.ru_to_px_wf(size.r());
@@ -471,19 +519,23 @@ impl Canvas {
         let fs = h * (2.0 / 3.0);
         let clip = self.clip();
         let (bw, bh) = (self.coords.width, self.coords.height);
-        let Canvas { pixels, text: engine, buttons, hit_counter, .. } = self;
+        let Canvas { pixels, text: engine, buttons, hit_counter, hit_map, .. } = self;
         let btn = buttons
             .entry(id)
             .or_insert_with(|| FButton::new(hit_counter, cx, cy, w, h, fs, label));
         btn.set_rect(cx, cy, w, h);
         btn.set_font_size(fs);
+        // Headless: bake hover/pressed into the fill (fluor's host overlay pass isn't running here).
+        btn.set_bake_states(true);
+        btn.set_fill(fill);
+        btn.set_hovered(hovered);
+        btn.set_pressed(pressed);
         if btn.label() != label {
             btn.set_label(label);
         }
-        let hid = btn.hit_id();
         let mut dmg = Damage::new();
         let mut fc = FCanvas::new(pixels, bw, bh, &mut dmg);
-        btn.render_content_into(&mut fc, 0.0, 0.0, engine, clip, None, hid);
+        btn.render_content_into(&mut fc, 0.0, 0.0, engine, clip, Some(hit_map.as_mut_slice()), id as HitId);
         Ok(())
     }
 
@@ -510,7 +562,7 @@ impl Canvas {
         let fs = self.coords.ru_to_px_hf(font_size);
         let clip = self.clip();
         let (bw, bh) = (self.coords.width, self.coords.height);
-        let Canvas { pixels, text: engine, textboxes, hit_counter, cursor_snaps, .. } = self;
+        let Canvas { pixels, text: engine, textboxes, hit_counter, hit_map, cursor_snaps, .. } = self;
         let tb = textboxes
             .entry(id)
             .or_insert_with(|| FTextbox::new(hit_counter, cx, cy, w, h, fs));
@@ -527,7 +579,6 @@ impl Canvas {
             tb.blinkey_visible = true;
         }
 
-        let hid = tb.hit_id();
         let mut dmg = Damage::new();
         let mut fc = FCanvas::new(pixels, bw, bh, &mut dmg);
         // Placeholder: faint text drawn FIRST (frontmost) when empty + unfocused; the pill
@@ -535,9 +586,10 @@ impl Canvas {
         if content.is_empty() && !is_focused && !placeholder.is_empty() {
             let ph = paint::pack_argb(160, 160, 160, 140);
             let tl = tb.text_left();
-            engine.draw_text_left_u32(&mut fc, placeholder, tl, cy, fs, 400, ph, "Open Sans", clip, None, None);
+            engine.draw_text_left(&mut fc, placeholder, tl, cy, &TextStyle::new(fs, ph), clip, None);
         }
-        tb.render_content_into(&mut fc, 0.0, 0.0, engine, clip, None, None, hid);
+        // Stamp `id` into hit_map at the textbox silhouette as fluor paints the pill.
+        tb.render_content_into(&mut fc, 0.0, 0.0, engine, clip, None, Some(hit_map.as_mut_slice()), id as HitId);
 
         if is_focused {
             // Snapshot the cursor strip AFTER content, BEFORE the wave — the blink flip

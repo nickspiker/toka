@@ -416,6 +416,32 @@ function stopBlinkey() {
     }
 }
 
+// Copy text to the clipboard. Uses the async Clipboard API on secure origins
+// (fgtw.org is https) and falls back to a hidden textarea + execCommand otherwise.
+// Called synchronously inside the mousedown handler, so it stays within the user gesture.
+function copyToClipboard(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text)
+            .then(() => log(`Copied ${text.length} chars to clipboard`, 'info'))
+            .catch(err => log(`Clipboard write failed: ${err.message}`, 'error'));
+        return;
+    }
+    // Fallback for non-secure contexts / older browsers
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+        document.execCommand('copy');
+        log(`Copied ${text.length} chars to clipboard (fallback)`, 'info');
+    } catch (e) {
+        log(`Clipboard fallback failed: ${e.message}`, 'error');
+    }
+    document.body.removeChild(ta);
+}
+
 // Process triggered actions from button clicks
 function processActions() {
     if (!currentVM || !currentCapsuleAddress) return;
@@ -427,6 +453,13 @@ function processActions() {
         const section = nullIdx >= 0
             ? new TextDecoder().decode(bytes.slice(0, nullIdx))
             : new TextDecoder().decode(bytes);
+        // `copy` actions are client-side only — write the payload (bytes after the NUL) to the
+        // clipboard and never hit the network. Everything else POSTs to the capsule endpoint.
+        if (section === 'copy') {
+            const payload = nullIdx >= 0 ? new TextDecoder().decode(bytes.slice(nullIdx + 1)) : '';
+            copyToClipboard(payload);
+            continue;
+        }
         log(`Action: ${section} → ${endpoint}`, 'info');
         fetch(endpoint, {
             method: 'POST',
@@ -457,6 +490,7 @@ function pageToRU(pageX, pageY) {
 function setupInteraction() {
     // ── Mouse ──────────────────────────────────────────
 
+    let lastHover = -1;
     canvas.addEventListener('mousemove', (e) => {
         if (!currentVM) return;
         const [rx, ry] = pageToRU(e.offsetX, e.offsetY);
@@ -465,6 +499,26 @@ function setupInteraction() {
         // Update CSS cursor based on hit regions
         const cursor = currentVM.cursor_at(rx, ry);
         canvas.style.cursor = cursor;
+
+        // Hover feedback: only when the hovered button actually changes (enter/leave), repaint.
+        // Must be a FULL rerun (interactiveRerender), not the differential path: the pill blits with
+        // fluor's under-blend, which skips any destination pixel that's already opaque. The
+        // differential path paints over the standing (opaque) frame → the pill is skipped (though the
+        // hit-map still stamps, which is why the cursor changes but the fill doesn't). A full rerun
+        // clears to transparent first, so every pill blits cleanly.
+        const hov = currentVM.hovered_widget();
+        if (hov !== lastHover) {
+            lastHover = hov;
+            interactiveRerender();
+        }
+    });
+
+    // Leaving the canvas clears any hover so the last button drops back to its resting fill.
+    canvas.addEventListener('mouseleave', () => {
+        if (!currentVM || lastHover === -1) return;
+        currentVM.set_mouse(100, 100); // well off-canvas (viewport is ~±0.7 RU) → no hit → hovered = none
+        lastHover = -1;
+        interactiveRerender();
     });
 
     canvas.addEventListener('mousedown', (e) => {

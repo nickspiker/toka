@@ -83,6 +83,10 @@ impl RuCoords {
 
     #[inline] pub fn ru_to_px_x(&self, x: ScalarF4E4) -> isize { (self.half_dims.r() + x * self.span * self.ru).to_isize() }
     #[inline] pub fn ru_to_px_y(&self, y: ScalarF4E4) -> isize { (self.half_dims.i() + (y - self.scroll_y) * self.span * self.ru).to_isize() }
+    /// Screen-space Y: no scroll term. For mapping a host pointer (already scroll-free, center-origin
+    /// RU) straight to the on-screen pixel row, e.g. to sample the hit_map. The inverse of the host's
+    /// `pageY → (offsetY - h/2)/(span·ru)` conversion.
+    #[inline] pub fn ru_to_px_y_screen(&self, y: ScalarF4E4) -> isize { (self.half_dims.i() + y * self.span * self.ru).to_isize() }
     #[inline] pub fn ru_to_px_w(&self, w: ScalarF4E4) -> isize { (w * self.span * self.ru).to_isize() }
     #[inline] pub fn ru_to_px_h(&self, h: ScalarF4E4) -> isize { (h * self.span * self.ru).to_isize() }
 

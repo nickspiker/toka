@@ -335,6 +335,17 @@ pub struct VM {
     /// Which widget has focus (receives keyboard events)
     focused_widget: Option<u32>,
 
+    /// Widget id under the most recent click, resolved once per frame against the standing hit_map
+    /// (see `reset`). The widget arms compare their own id against this instead of re-deriving a
+    /// hit rect — pixel-accurate and scroll-correct because it reads the actual painted silhouette.
+    pending_click: Option<u32>,
+
+    /// Widget id currently under the pointer (hover) and the one held down (press), both resolved
+    /// from the hit_map. Buttons fold these into their baked fill, giving hover/pressed feedback in
+    /// the headless (no host overlay) path. `hovered` updates on move; `pressed` on down, clears on up.
+    hovered_widget: Option<u32>,
+    pressed_widget: Option<u32>,
+
     /// Mouse button state (true = currently pressed)
     mouse_down: bool,
 
@@ -417,6 +428,9 @@ impl VM {
             resources: HashMap::new(),
             pending_requests: Vec::new(),
             focused_widget: None,
+            pending_click: None,
+            hovered_widget: None,
+            pressed_widget: None,
             mouse_down: false,
             actions: Vec::new(),
             widget_snapshots: Vec::new(),
@@ -509,9 +523,34 @@ impl VM {
         self.hit_regions.clear(); // Rebuilt each frame
         self.actions.clear(); // Rebuilt each frame
         self.widget_snapshots.clear(); // Rebuilt on full render
-        // If there's a mousedown event, clear focus — opcodes will re-establish if click is inside a widget
-        if self.events.iter().any(|e| matches!(e, InputEvent::MouseDown { .. })) {
-            self.focused_widget = None;
+        // Resolve any pending click against the STANDING hit_map — the last frame's silhouettes are
+        // still intact here (the `clear` opcode wipes them later this frame). Pixel-space lookup, so
+        // it's exact and scroll-correct; the widget arms consume `pending_click` as they repaint.
+        let mousedown = self.events.iter().rev().find_map(|e| match e {
+            InputEvent::MouseDown { x, y } => Some((*x, *y)),
+            _ => None,
+        });
+        if let Some((x, y)) = mousedown {
+            let hit = self.canvas.hit_at_screen_ru(x, y);
+            self.pending_click = hit; // consumed by button arms (any widget id)
+            self.pressed_widget = hit; // held colour while the pointer is down on it
+            // Focus follows text inputs only; clicking a button or bare canvas blurs (so the blinkey
+            // never spins on a non-editable target).
+            self.focused_widget = match hit {
+                Some(id) if self.text_inputs.contains_key(&id) => {
+                    if let Some(state) = self.text_inputs.get_mut(&id) {
+                        state.selection_anchor = None;
+                    }
+                    Some(id)
+                }
+                _ => None,
+            };
+        } else {
+            self.pending_click = None;
+        }
+        // Any mouse-up releases the press (the release also fires the button's action this frame).
+        if self.events.iter().any(|e| matches!(e, InputEvent::MouseUp { .. })) {
+            self.pressed_widget = None;
         }
         // text_inputs, mouse_down persist
         // Reset blinkey visual state — canvas is repainted on rerun
@@ -1858,24 +1897,16 @@ impl VM {
                     cursor: CursorKind::Pointer,
                 });
 
-                // fluor Button — pill, AA edges, fluor theme (capsule accent colour retired)
-                let left = pos.r() - half_w;
-                let right = pos.r() + half_w;
-                let top = pos.i() - half_h;
-                let bottom = pos.i() + half_h;
-                let _ = &colour;
-                self.canvas.draw_widget_button(widget_id, pos, size, &label)?;
+                // fluor Button — pill, AA edges. Capsule colour → resting fill (None on failure →
+                // default theme fill); hover/pressed fold into the baked fill. fluor stamps
+                // `widget_id` into the hit_map at the silhouette.
+                let fill = crate::renderer::extract_colour_u32(&colour).ok();
+                let hovered = self.hovered_widget == Some(widget_id);
+                let pressed = self.pressed_widget == Some(widget_id);
+                self.canvas.draw_widget_button(widget_id, pos, size, &label, fill, hovered, pressed)?;
 
-                // Check if clicked this frame (mouse Y is screen-space, bounds are content-space)
-                let mut clicked = false;
-                for event in &self.events {
-                    if let InputEvent::MouseDown { x, y } = event {
-                        let yc = *y + self.scroll_y;
-                        if *x >= left && *x <= right && yc >= top && yc <= bottom {
-                            clicked = true;
-                        }
-                    }
-                }
+                // Hit resolved once per frame in `reset` against the standing hit_map.
+                let clicked = self.pending_click == Some(widget_id);
                 self.stack.push(VsfType::s44(if clicked {
                     ScalarF4E4::ONE
                 } else {
@@ -1937,9 +1968,7 @@ impl VM {
                 let half_w = size.r() >> 1usize;
                 let half_h = size.i() >> 1usize;
                 let left = pos.r() - half_w;
-                let right = pos.r() + half_w;
                 let top = pos.i() - half_h;
-                let bottom = pos.i() + half_h;
                 self.hit_regions.push(HitRegion {
                     x: left,
                     y: top,
@@ -2028,18 +2057,7 @@ impl VM {
                     }
                 }
 
-                // Handle click-to-focus and click-to-position (screen-space Y → content-space)
-                for event in &self.events {
-                    if let InputEvent::MouseDown { x, y } = event {
-                        let yc = *y + self.scroll_y;
-                        if *x >= left && *x <= right && yc >= top && yc <= bottom {
-                            self.focused_widget = Some(widget_id);
-                            // TODO: compute cursor position from click x using font metrics
-                            let state = self.text_inputs.get_mut(&widget_id).unwrap();
-                            state.selection_anchor = None;
-                        }
-                    }
-                }
+                // Focus + selection-reset already resolved in `reset` from the standing hit_map.
 
                 // Snapshot background before drawing widget
                 let font_key = *blake3::hash(&font_bytes).as_bytes();
@@ -2582,9 +2600,7 @@ impl VM {
                             let half_w = padded_w >> 1usize;
                             let half_h = padded_h >> 1usize;
                             let left = cell_center.r() - half_w;
-                            let right = cell_center.r() + half_w;
                             let top = cell_center.i() - half_h;
-                            let bottom = cell_center.i() + half_h;
 
                             self.hit_regions.push(HitRegion {
                                 x: left,
@@ -2610,19 +2626,16 @@ impl VM {
                                 bg_pixels, px_x, px_y, px_w, px_h,
                             });
 
-                            // fluor Button — pill + AA + fluor theme (capsule accent colour retired)
-                            let _ = colour;
-                            self.canvas.draw_widget_button(widget_id, cell_center, btn_size, label)?;
+                            // fluor Button — pill + AA. The capsule colour drives the resting fill
+                            // (None on extract failure → fluor's default theme fill); hover/pressed
+                            // fold into the baked fill. fluor stamps `widget_id` into the hit_map.
+                            let fill = crate::renderer::extract_colour_u32(colour).ok();
+                            let hovered = self.hovered_widget == Some(widget_id);
+                            let pressed = self.pressed_widget == Some(widget_id);
+                            self.canvas.draw_widget_button(widget_id, cell_center, btn_size, label, fill, hovered, pressed)?;
 
-                            let mut clicked = false;
-                            for event in &self.events {
-                                if let InputEvent::MouseDown { x, y } = event {
-                                    let yc = *y + self.scroll_y;
-                                    if *x >= left && *x <= right && yc >= top && yc <= bottom {
-                                        clicked = true;
-                                    }
-                                }
-                            }
+                            // Hit resolved once per frame in `reset` against the standing hit_map.
+                            let clicked = self.pending_click == Some(widget_id);
                             if clicked {
                                 if let Some(url) = action_url {
                                     self.actions.push(url.clone());
@@ -2648,9 +2661,7 @@ impl VM {
                             let half_w = padded_w >> 1usize;
                             let half_h = padded_h >> 1usize;
                             let left = cell_center.r() - half_w;
-                            let right = cell_center.r() + half_w;
                             let top = cell_center.i() - half_h;
-                            let bottom = cell_center.i() + half_h;
 
                             self.hit_regions.push(HitRegion {
                                 x: left,
@@ -2740,16 +2751,7 @@ impl VM {
                                 }
                             }
 
-                            for event in &self.events {
-                                if let InputEvent::MouseDown { x, y } = event {
-                                    let yc = *y + self.scroll_y;
-                                    if *x >= left && *x <= right && yc >= top && yc <= bottom {
-                                        self.focused_widget = Some(widget_id);
-                                        let state = self.text_inputs.get_mut(&widget_id).unwrap();
-                                        state.selection_anchor = None;
-                                    }
-                                }
-                            }
+                            // Focus + selection-reset already resolved in `reset` from the standing hit_map.
 
                             // Snapshot background + draw using shared method
                             let (bg_pixels, px_x, px_y, px_w, px_h) =
@@ -3386,6 +3388,18 @@ impl VM {
     pub fn set_mouse(&mut self, mouse_x: ScalarF4E4, mouse_y: ScalarF4E4) {
         self.mouse_x = mouse_x;
         self.mouse_y = mouse_y;
+        // Track the hovered button off the standing hit_map. Text inputs aren't hover targets, so a
+        // pointer over one reads as "no hover" (keeps repaints to genuine button enter/leave).
+        self.hovered_widget = match self.canvas.hit_at_screen_ru(mouse_x, mouse_y) {
+            Some(id) if self.text_inputs.contains_key(&id) => None,
+            other => other,
+        };
+    }
+
+    /// Widget id currently hovered (button under the pointer), or `None`. The host polls this after
+    /// `set_mouse` to decide whether a hover repaint is needed.
+    pub fn hovered_widget(&self) -> Option<u32> {
+        self.hovered_widget
     }
 
     /// Get mouse/pointer X position (in RU)
@@ -3460,41 +3474,14 @@ impl VM {
         self.text_inputs.get(&id)
     }
 
-    /// Check if a point (in screen-space RU) hits any registered widget
-    pub fn hit_test(&self, x: ScalarF4E4, y: ScalarF4E4) -> Option<&HitRegion> {
-        // Convert screen-space Y to content-space (hit regions are stored in content coords)
-        let y_content = y + self.scroll_y;
-        // Last registered wins (top-most in draw order)
-        self.hit_regions
-            .iter()
-            .rev()
-            .find(|r| x >= r.x && x <= r.x + r.w && y_content >= r.y && y_content <= r.y + r.h)
-    }
-
-    /// Process a click event — update focus based on hit testing
-    fn process_click(&mut self, x: ScalarF4E4, y: ScalarF4E4) -> Option<u32> {
-        // Convert screen-space Y to content-space (hit regions stored in content coords)
-        let y_content = y + self.scroll_y;
-        // Find which widget was clicked
-        let clicked_id = self
-            .hit_regions
-            .iter()
-            .rev()
-            .find(|r| x >= r.x && x <= r.x + r.w && y_content >= r.y && y_content <= r.y + r.h)
-            .map(|r| r.widget_id);
-
-        // Update focus
-        self.focused_widget = clicked_id;
-
-        // For text inputs, set cursor position from click x
-        if let Some(id) = clicked_id {
-            if let Some(state) = self.text_inputs.get_mut(&id) {
-                state.selection_anchor = None;
-                // Cursor positioning is done in the opcode handler where we have font metrics
-            }
+    /// Cursor kind under a screen-space RU point, resolved via the per-pixel hit_map: a text-input
+    /// silhouette → `Text`, any other widget → `Pointer`, bare canvas → `Default`.
+    pub fn cursor_kind_at(&self, x: ScalarF4E4, y: ScalarF4E4) -> CursorKind {
+        match self.canvas.hit_at_screen_ru(x, y) {
+            Some(id) if self.text_inputs.contains_key(&id) => CursorKind::Text,
+            Some(_) => CursorKind::Pointer,
+            None => CursorKind::Default,
         }
-
-        clicked_id
     }
 
     /// Draw a text input widget's visual content (border + text + cursor).
@@ -3544,15 +3531,15 @@ impl VM {
             return Ok(false);
         }
 
-        // Process focus changes from mouse events
+        // Process focus changes from mouse events — sample the standing hit_map (screen pixel space)
+        // rather than a re-derived rect, matching the full-render path in `reset`. Focus follows text
+        // inputs only.
         for event in &self.events {
             if let InputEvent::MouseDown { x, y } = event {
-                // Convert screen-space Y to content-space
-                let y_content = *y + self.scroll_y;
-                let clicked_id = self.hit_regions.iter().rev()
-                    .find(|r| *x >= r.x && *x <= r.x + r.w && y_content >= r.y && y_content <= r.y + r.h)
-                    .map(|r| r.widget_id);
-                self.focused_widget = clicked_id;
+                self.focused_widget = match self.canvas.hit_at_screen_ru(*x, *y) {
+                    Some(id) if self.text_inputs.contains_key(&id) => Some(id),
+                    _ => None,
+                };
             }
         }
 
@@ -3628,27 +3615,38 @@ impl VM {
             }
         }
 
-        // Redraw only text input widgets (buttons are static during keyboard interaction)
+        // Restore each widget's saved background and redraw it with current state. Text inputs pick
+        // up keystrokes/focus; buttons pick up hover/pressed (the fill re-bakes only on a genuine
+        // state change, so idle buttons just re-blit their cached pill). This is the cheap path that
+        // lets hover follow the cursor without re-executing the whole capsule.
         let snapshots = std::mem::take(&mut self.widget_snapshots);
         for snap in &snapshots {
-            if let WidgetSnapshotKind::TextInput { ref placeholder } = snap.kind {
-                // Restore background pixels, then redraw with current state. The fluor Textbox
-                // owns the blinkey (drawn inside draw_text_input_visual when focused), so no
-                // separate wave add/sub bookkeeping here.
-                self.canvas.restore_region(&snap.bg_pixels, snap.px_x, snap.px_y, snap.px_w, snap.px_h);
-                let is_focused = self.focused_widget == Some(snap.widget_id);
-                if let Some(state) = self.text_inputs.get(&snap.widget_id) {
-                    Self::draw_text_input_visual(
-                        &mut self.canvas, &mut self.font_cache,
-                        snap.widget_id,
-                        snap.pos, snap.size, &snap.colour, placeholder,
-                        snap.font_key, &snap.font_bytes,
-                        state, is_focused,
-                        snap.text_size,
+            self.canvas.restore_region(&snap.bg_pixels, snap.px_x, snap.px_y, snap.px_w, snap.px_h);
+            match &snap.kind {
+                WidgetSnapshotKind::TextInput { placeholder } => {
+                    // The fluor Textbox owns the blinkey (drawn inside draw_text_input_visual when
+                    // focused), so no separate wave add/sub bookkeeping here.
+                    let is_focused = self.focused_widget == Some(snap.widget_id);
+                    if let Some(state) = self.text_inputs.get(&snap.widget_id) {
+                        Self::draw_text_input_visual(
+                            &mut self.canvas, &mut self.font_cache,
+                            snap.widget_id,
+                            snap.pos, snap.size, &snap.colour, placeholder,
+                            snap.font_key, &snap.font_bytes,
+                            state, is_focused,
+                            snap.text_size,
+                        )?;
+                    }
+                }
+                WidgetSnapshotKind::Button { label, .. } => {
+                    let fill = crate::renderer::extract_colour_u32(&snap.colour).ok();
+                    let hovered = self.hovered_widget == Some(snap.widget_id);
+                    let pressed = self.pressed_widget == Some(snap.widget_id);
+                    self.canvas.draw_widget_button(
+                        snap.widget_id, snap.pos, snap.size, label, fill, hovered, pressed,
                     )?;
                 }
             }
-            // Buttons: skip — they don't change on keystrokes, full rerun handles clicks
         }
         self.widget_snapshots = snapshots;
         self.events.clear();
