@@ -231,14 +231,15 @@ function setupScrollTracking() {
 // Handle resolution via memory-hard proof-of-work
 // plaintext → blake3 → 17-round proof → base64url filename → fetch capsule
 async function resolveHandle(handleName) {
-    const normalized = handleName.toLowerCase().trim();
+    // HANDLES ARE BYTE-PRECISE (2026-08-18): the RAW typed string goes to the proof — no case folding, no trimming, ever. `Alice` ≠ `alice`, a trailing space is identity, whitespace-only is a valid handle; the ONLY validation anywhere is non-empty. NFC happens inside the Rust VSF x encoder, nowhere else.
+    if (!handleName) return;
 
     try {
         log(`Resolving handle: "${handleName}"`, 'info');
 
         // Run memory-hard proof to get deterministic filename
         log('Computing handle proof (this takes a few seconds)...', 'info');
-        const filename = wasmModule.resolve_handle(normalized);
+        const filename = wasmModule.resolve_handle(handleName);
         currentCapsuleAddress = filename.replace('.vsf', '');
         log(`Proof complete → /${filename}`, 'info');
 
@@ -608,7 +609,7 @@ function setupHandleInput() {
     if (handleField) {
         handleField.addEventListener('keypress', async (e) => {
             if (e.key === 'Enter') {
-                const handle = handleField.value.trim();
+                const handle = handleField.value; // byte-precise: no trim — trailing spaces are the human's choice
                 if (handle) {
                     log(`Loading: ${handle}`, 'info');
                     if (handleInput) handleInput.classList.add('hidden');
@@ -623,7 +624,7 @@ function setupHandleInput() {
     const consoleHandle = document.getElementById('consoleHandle');
     const loadConsoleHandle = async () => {
         if (!consoleHandle) return;
-        const handle = consoleHandle.value.trim();
+        const handle = consoleHandle.value; // byte-precise: no trim
         if (handle) {
             log(`Loading: ${handle}`, 'info');
             if (handleInput) handleInput.classList.add('hidden');
