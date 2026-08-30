@@ -1,18 +1,15 @@
 //! Drawing layer — single fluor-backed pipeline, front-to-back.
 //!
-//! `Canvas` owns an α+darkness pixel buffer (`0xααRRGGBB`, RGB = 255−visible) and draws into it
-//! with fluor's paint primitives + `TextRenderer`, in fluor's native order: **front-to-back**.
+//! `Canvas` owns an α+darkness pixel buffer (`0xααRRGGBB`, RGB = 255−visible) and draws into it with fluor's paint primitives + `TextRenderer`, in fluor's native order: **front-to-back**.
 //! The buffer starts EMPTY (`0x00000000`); content paints frontmost-first (cell text → grid lines
-//! → row fills — see `VM::render_table`), each `under`-blending BEHIND what's already there with
-//! the opaque early-out skipping occluded pixels. The photon "liquid stone" noise backdrop
+//! → row fills — see `VM::render_table`), each `under`-blending BEHIND what's already there with the opaque early-out skipping occluded pixels. The photon "liquid stone" noise backdrop
 //! ([`fluor::paint::background_noise`]) lands last of all in [`Canvas::to_rgba_bytes`], under-
 //! compositing behind every remaining empty/translucent pixel. This mirrors photon's fluor-native
 //! GUI (`PhotonApp::render`): widgets and watermarks first, background noise as the final pass.
 //!
 //! Coordinates: RU math stays in [`shared::RuCoords`] (spirix, center-origin, harmonic-mean span);
 //! each primitive converts to f32 pixel space at the fluor boundary via the `ru_to_px_*f` helpers.
-//! Colour funnels through [`crate::renderer::extract_colour_u32`] → fluor α+darkness. Output flips
-//! back to visible RGBA in [`Canvas::to_rgba_bytes`].
+//! Colour funnels through [`crate::renderer::extract_colour_u32`] → fluor α+darkness. Output flips back to visible RGBA in [`Canvas::to_rgba_bytes`].
 
 pub mod shared;
 
@@ -32,8 +29,7 @@ use fluor::text::TextRenderer;
 use fluor::widgets::button::Button as FButton;
 use fluor::widgets::textbox::Textbox as FTextbox;
 
-/// Empty pixel — no opacity, no darkness. The canvas resets to this; the noise backdrop
-/// under-fills whatever content leaves empty.
+/// Empty pixel — no opacity, no darkness. The canvas resets to this; the noise backdrop under-fills whatever content leaves empty.
 const EMPTY: u32 = 0x0000_0000;
 
 /// Single fluor-backed canvas.
@@ -45,26 +41,20 @@ pub struct Canvas {
     text: TextRenderer,
     /// Capsule-shipped fonts: `font_key` → registered family name in fluor's font DB.
     fonts: HashMap<[u8; 32], String>,
-    /// fluor widgets keyed by the VM's widget id — persist across frames so their pill/text
-    /// caches survive and (for textboxes) blinkey/scroll state carries over.
+    /// fluor widgets keyed by the VM's widget id — persist across frames so their pill/text caches survive and (for textboxes) blinkey/scroll state carries over.
     buttons: HashMap<u32, FButton>,
     textboxes: HashMap<u32, FTextbox>,
     /// Dense fluor hit-id allocator for the widgets above (unused for routing now — see `hit_map`).
     hit_counter: HitId,
     /// Per-pixel widget silhouette map, parallel to `pixels`. Each interactive widget stamps its
     /// VM widget id (cast to `HitId`) here as fluor paints its true pill/textbox silhouette, so
-    /// `hit_map[y*w + x]` is the source of truth for "what's under this pixel" — the same model the
-    /// desktop/Photon fluor host uses. `0` = nothing. Cleared within the clip band each frame and
-    /// shifted alongside `pixels` on scroll, so a scrolled widget's hit region rides with its pixels.
+    /// `hit_map[y*w + x]` is the source of truth for "what's under this pixel" — the same model the desktop/Photon fluor host uses. `0` = nothing. Cleared within the clip band each frame and shifted alongside `pixels` on scroll, so a scrolled widget's hit region rides with its pixels.
     hit_map: Vec<HitId>,
-    /// Saved cursor-strip pixels per focused textbox: (pixels, x, y, w, h). Captured after the
-    /// textbox content renders but before the blinkey wave, so a blink flip can restore the
-    /// strip and repaint the alternate wave without a full frame rerun.
+    /// Saved cursor-strip pixels per focused textbox: (pixels, x, y, w, h). Captured after the textbox content renders but before the blinkey wave, so a blink flip can restore the strip and repaint the alternate wave without a full frame rerun.
     cursor_snaps: HashMap<u32, (Vec<u32>, usize, usize, usize, usize)>,
 }
 
-/// Map toka's blend-mode enum onto fluor's smaller set; anything without a fluor equivalent
-/// falls back to Normal (source-over).
+/// Map toka's blend-mode enum onto fluor's smaller set; anything without a fluor equivalent falls back to Normal (source-over).
 fn to_fluor_blend(mode: BlendMode) -> fluor::BlendMode {
     use fluor::BlendMode as F;
     match mode {
@@ -129,8 +119,7 @@ impl Canvas {
         }
     }
 
-    /// Reset the (clip band of the) canvas to EMPTY for a fresh front-to-back pass. The capsule's
-    /// requested clear colour is superseded by the photon noise backdrop painted at output time —
+    /// Reset the (clip band of the) canvas to EMPTY for a fresh front-to-back pass. The capsule's requested clear colour is superseded by the photon noise backdrop painted at output time —
     /// one look across the whole fluor stack.
     pub fn clear(&mut self, _colour: &vsf::VsfType) -> Result<(), String> {
         let w = self.coords.width;
@@ -144,13 +133,9 @@ impl Canvas {
         Ok(())
     }
 
-    /// Final composite + output: under-paint the photon "liquid stone" noise backdrop behind all
-    /// content (idempotent — pixels already opaque early-out), then flip α+darkness → visible RGBA
-    /// for the browser's ImageData.
+    /// Final composite + output: under-paint the photon "liquid stone" noise backdrop behind all content (idempotent — pixels already opaque early-out), then flip α+darkness → visible RGBA for the browser's ImageData.
     ///
-    /// The noise scrolls with content (photon behaviour): `scroll_offset` shifts which logical row
-    /// seeds each screen row, so the exposed strip after a scroll regenerates pattern-continuous
-    /// rows rather than restarting at the screen edge.
+    /// The noise scrolls with content (photon behaviour): `scroll_offset` shifts which logical row seeds each screen row, so the exposed strip after a scroll regenerates pattern-continuous rows rather than restarting at the screen edge.
     pub fn to_rgba_bytes(&mut self) -> Vec<u8> {
         let (w, h) = (self.coords.width, self.coords.height);
         let scroll_px = self.coords.ru_to_px_h(self.coords.scroll_y);
@@ -186,8 +171,7 @@ impl Canvas {
         Ok(())
     }
 
-    /// Blit a decoded image (α + darkness pixels, row-major `src_w × src_h`) scaled into the RU
-    /// rect at `pos` with `size`. Mirrors `fill_rect_ru`'s RU→px + FCanvas plumbing; the scale +
+    /// Blit a decoded image (α + darkness pixels, row-major `src_w × src_h`) scaled into the RU rect at `pos` with `size`. Mirrors `fill_rect_ru`'s RU→px + FCanvas plumbing; the scale +
     /// UNDER-composite live in `paint::draw_image`.
     pub fn blit_image_ru(&mut self, pos: CircleF4E4, size: CircleF4E4, src: &[u32], src_w: usize, src_h: usize) -> Result<(), String> {
         let cx = self.coords.ru_to_px_xf(pos.r());
@@ -361,9 +345,7 @@ impl Canvas {
         let Canvas { text: engine, pixels, .. } = self;
         let mut dmg = Damage::new();
         let mut fc = FCanvas::new(pixels, w, h, &mut dmg);
-        // fluor's draw_text_* centre a SINGLE line on `y` (its height measure is the first
-        // layout run only), so multi-line blocks must be split here and block-centred: line i
-        // of n draws at cy − (n−1−2i)·line_h/2. line_h matches fluor's Metrics::relative ratio.
+        // fluor's draw_text_* centre a SINGLE line on `y` (its height measure is the first layout run only), so multi-line blocks must be split here and block-centred: line i of n draws at cy − (n−1−2i)·line_h/2. line_h matches fluor's Metrics::relative ratio.
         let lines: Vec<&str> = text.split('\n').collect();
         let n = lines.len();
         let line_h = px * 1.2;
@@ -393,8 +375,7 @@ impl Canvas {
             self.hit_map.fill(0);
             return;
         }
-        // Shift the hit_map in lockstep with the pixels so a widget's hit region rides along with
-        // its silhouette; the exposed strip is re-stamped by the clipped rerun that follows.
+        // Shift the hit_map in lockstep with the pixels so a widget's hit region rides along with its silhouette; the exposed strip is re-stamped by the clipped rerun that follows.
         if delta_y > 0 {
             self.pixels.copy_within(d * w..h * w, 0);
             self.pixels[((h - d) * w)..].fill(EMPTY);
@@ -426,8 +407,7 @@ impl Canvas {
         }
     }
 
-    /// Composite a finished layer into the front-to-back stream: the layer goes BEHIND existing
-    /// content and in front of anything drawn after (`layer.under(main)`), scaled by opacity.
+    /// Composite a finished layer into the front-to-back stream: the layer goes BEHIND existing content and in front of anything drawn after (`layer.under(main)`), scaled by opacity.
     pub fn composite_layer(&mut self, layer: &Canvas, opacity: ScalarF4E4, mode: BlendMode) {
         let op = (opacity * 255i32).to_i32().clamp(0, 255) as u32;
         if op == 0 { return; }
@@ -488,10 +468,7 @@ impl Canvas {
         self.hit_map[px_y * self.coords.width + px_x]
     }
 
-    /// Resolve a screen-space RU point (center-origin, scroll NOT baked in — exactly what the host
-    /// delivers from `pageToRU`) to the widget id stamped under it, or `None`. Goes straight to
-    /// screen pixel space and samples `hit_map`, so there's no scroll/rect arithmetic to drift and
-    /// the hit matches the pixels actually on screen.
+    /// Resolve a screen-space RU point (center-origin, scroll NOT baked in — exactly what the host delivers from `pageToRU`) to the widget id stamped under it, or `None`. Goes straight to screen pixel space and samples `hit_map`, so there's no scroll/rect arithmetic to drift and the hit matches the pixels actually on screen.
     pub fn hit_at_screen_ru(&self, x: ScalarF4E4, y: ScalarF4E4) -> Option<u32> {
         let px = self.coords.ru_to_px_x(x); // x axis carries no scroll term
         let py = self.coords.ru_to_px_y_screen(y);
@@ -539,10 +516,8 @@ impl Canvas {
         Ok(())
     }
 
-    /// Paint a fluor `Textbox` for VM widget `id`, syncing content/cursor/focus from the VM's
-    /// input state (the VM stays the source of truth; the widget is the renderer). When focused,
-    /// snapshots the cursor strip (post-content, pre-wave) so [`Self::flip_textbox_blinkey`] can
-    /// animate the cursor without a frame rerun, then paints the wave.
+    /// Paint a fluor `Textbox` for VM widget `id`, syncing content/cursor/focus from the VM's input state (the VM stays the source of truth; the widget is the renderer). When focused,
+    /// snapshots the cursor strip (post-content, pre-wave) so [`Self::flip_textbox_blinkey`] can animate the cursor without a frame rerun, then paints the wave.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_widget_textbox(
         &mut self,
@@ -581,8 +556,7 @@ impl Canvas {
 
         let mut dmg = Damage::new();
         let mut fc = FCanvas::new(pixels, bw, bh, &mut dmg);
-        // Placeholder: faint text drawn FIRST (frontmost) when empty + unfocused; the pill
-        // interior paints under it. fluor Textbox has no placeholder concept of its own.
+        // Placeholder: faint text drawn FIRST (frontmost) when empty + unfocused; the pill interior paints under it. fluor Textbox has no placeholder concept of its own.
         if content.is_empty() && !is_focused && !placeholder.is_empty() {
             let ph = paint::pack_argb(160, 160, 160, 140);
             let tl = tb.text_left();
@@ -592,8 +566,7 @@ impl Canvas {
         tb.render_content_into(&mut fc, 0.0, 0.0, engine, clip, None, Some(hit_map.as_mut_slice()), id as HitId);
 
         if is_focused {
-            // Snapshot the cursor strip AFTER content, BEFORE the wave — the blink flip
-            // restores this and repaints the alternate wave.
+            // Snapshot the cursor strip AFTER content, BEFORE the wave — the blink flip restores this and repaints the alternate wave.
             let bb = tb.cursor_bbox();
             let sx = (bb.x.floor().max(0.0) as usize).min(bw);
             let sy = (bb.y.floor().max(0.0) as usize).min(bh);
@@ -613,8 +586,7 @@ impl Canvas {
         Ok(())
     }
 
-    /// Blink tick for the focused textbox: restore the saved cursor strip, flip fluor's wave
-    /// state (alternating top/bottom-bright), repaint. No-op without a focused textbox + snapshot.
+    /// Blink tick for the focused textbox: restore the saved cursor strip, flip fluor's wave state (alternating top/bottom-bright), repaint. No-op without a focused textbox + snapshot.
     pub fn flip_textbox_blinkey(&mut self, id: u32) {
         let (bw, bh) = (self.coords.width, self.coords.height);
         let Canvas { pixels, textboxes, cursor_snaps, .. } = self;
@@ -687,9 +659,7 @@ mod render_tests {
     use spirix::ScalarF4E4;
     use vsf::types::VsfType;
 
-    // NOTE: on spirix 0.0.12 (toka's pinned crates.io version) `from_f32(0.0)` does NOT yield a
-    // clean zero — downstream `to_f32()` produces NaN. The local /mnt/Octopus/Code/spirix tree
-    // fixed this, but toka is pinned to 0.0.12. Route exact zeros through ZERO.
+    // NOTE: on spirix 0.0.12 (toka's pinned crates.io version) `from_f32(0.0)` does NOT yield a clean zero — downstream `to_f32()` produces NaN. The local /mnt/Octopus/Code/spirix tree fixed this, but toka is pinned to 0.0.12. Route exact zeros through ZERO.
     fn s(v: f32) -> ScalarF4E4 {
         if v == 0.0 { ScalarF4E4::ZERO } else { ScalarF4E4::from_f32(v) }
     }
@@ -705,8 +675,7 @@ mod render_tests {
         r < 0x40 && g < 0x40 && b < 0x40
     }
 
-    /// A filled rect on the empty canvas is opaque at its centre; untouched corners get the photon
-    /// noise backdrop at output. Proves the front-to-back chain end to end.
+    /// A filled rect on the empty canvas is opaque at its centre; untouched corners get the photon noise backdrop at output. Proves the front-to-back chain end to end.
     #[test]
     fn fill_rect_center_and_backdrop() {
         let mut c = Canvas::new_fast(128, 128);

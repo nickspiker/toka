@@ -8,9 +8,7 @@
 //!
 //! # Type Safety
 //!
-//! **No implicit type conversion.** If you push an S44 and an S43, you cannot
-//! add them - you get a runtime error. This mirrors Rust's compile-time type
-//! safety at runtime. Spirix handles all arithmetic with proper type checking.
+//! **No implicit type conversion.** If you push an S44 and an S43, you cannot add them - you get a runtime error. This mirrors Rust's compile-time type safety at runtime. Spirix handles all arithmetic with proper type checking.
 //!
 //! # Bytecode Format
 //! The bytecode is a valid VSF stream where:
@@ -323,9 +321,7 @@ pub struct VM {
     text_inputs: HashMap<u32, TextInputState>,
 
     /// Async resource table keyed by resource key (e.g. an avatar storage key). `draw_image`
-    /// resolves against this: `Decoded` blits, `Bytes` decodes-then-blits, anything else draws a
-    /// placeholder and (if unseen) records the key in `pending_requests`. Persists across resize
-    /// so a resolved avatar survives a reflow without re-fetching.
+    /// resolves against this: `Decoded` blits, `Bytes` decodes-then-blits, anything else draws a placeholder and (if unseen) records the key in `pending_requests`. Persists across resize so a resolved avatar survives a reflow without re-fetching.
     resources: HashMap<String, ResourceState>,
 
     /// Resource keys a render wanted but couldn't resolve — drained by the host via
@@ -336,13 +332,10 @@ pub struct VM {
     focused_widget: Option<u32>,
 
     /// Widget id under the most recent click, resolved once per frame against the standing hit_map
-    /// (see `reset`). The widget arms compare their own id against this instead of re-deriving a
-    /// hit rect — pixel-accurate and scroll-correct because it reads the actual painted silhouette.
+    /// (see `reset`). The widget arms compare their own id against this instead of re-deriving a hit rect — pixel-accurate and scroll-correct because it reads the actual painted silhouette.
     pending_click: Option<u32>,
 
-    /// Widget id currently under the pointer (hover) and the one held down (press), both resolved
-    /// from the hit_map. Buttons fold these into their baked fill, giving hover/pressed feedback in
-    /// the headless (no host overlay) path. `hovered` updates on move; `pressed` on down, clears on up.
+    /// Widget id currently under the pointer (hover) and the one held down (press), both resolved from the hit_map. Buttons fold these into their baked fill, giving hover/pressed feedback in the headless (no host overlay) path. `hovered` updates on move; `pressed` on down, clears on up.
     hovered_widget: Option<u32>,
     pressed_widget: Option<u32>,
 
@@ -453,9 +446,7 @@ impl VM {
         // font_cache, text_inputs, focused_widget, events all preserved
     }
 
-    /// Resolve a `draw_image` key against the resource table and blit it, else record a pending
-    /// host request and draw a placeholder. Host-delivered `Bytes` are decoded to `Decoded` lazily
-    /// here, on the first draw that needs them, so decode cost is paid once and off the fetch path.
+    /// Resolve a `draw_image` key against the resource table and blit it, else record a pending host request and draw a placeholder. Host-delivered `Bytes` are decoded to `Decoded` lazily here, on the first draw that needs them, so decode cost is paid once and off the fetch path.
     fn draw_image(
         &mut self,
         key: String,
@@ -491,21 +482,18 @@ impl VM {
         self.draw_image_placeholder(pos, size)
     }
 
-    /// Dim placeholder occupying the same rect the image will fill, so nothing shifts when it
-    /// resolves. α + darkness dim grey.
+    /// Dim placeholder occupying the same rect the image will fill, so nothing shifts when it resolves. α + darkness dim grey.
     fn draw_image_placeholder(&mut self, pos: CircleF4E4, size: CircleF4E4) -> Result<(), String> {
         let dim = VsfType::ra([48, 48, 48, 200]);
         self.canvas.fill_rect_ru(pos, size, &dim)
     }
 
-    /// Drain the resource keys the last render wanted but couldn't resolve. The host fetches each
-    /// over the VSF wire and feeds the bytes back via `provide_resource`, then re-renders.
+    /// Drain the resource keys the last render wanted but couldn't resolve. The host fetches each over the VSF wire and feeds the bytes back via `provide_resource`, then re-renders.
     pub fn take_pending_requests(&mut self) -> Vec<String> {
         std::mem::take(&mut self.pending_requests)
     }
 
-    /// Hand the VM a fetched resource's VSF bytes, keyed by the request key. Stored raw; decoded
-    /// lazily on the next `draw_image` that needs it. Overwrites any prior state for the key
+    /// Hand the VM a fetched resource's VSF bytes, keyed by the request key. Stored raw; decoded lazily on the next `draw_image` that needs it. Overwrites any prior state for the key
     /// (so a re-fetch replaces a `Failed`/`Pending` entry).
     pub fn provide_resource(&mut self, key: String, vsf_bytes: Vec<u8>) {
         self.resources.insert(key, ResourceState::Bytes(vsf_bytes));
@@ -523,9 +511,7 @@ impl VM {
         self.hit_regions.clear(); // Rebuilt each frame
         self.actions.clear(); // Rebuilt each frame
         self.widget_snapshots.clear(); // Rebuilt on full render
-        // Resolve any pending click against the STANDING hit_map — the last frame's silhouettes are
-        // still intact here (the `clear` opcode wipes them later this frame). Pixel-space lookup, so
-        // it's exact and scroll-correct; the widget arms consume `pending_click` as they repaint.
+        // Resolve any pending click against the STANDING hit_map — the last frame's silhouettes are still intact here (the `clear` opcode wipes them later this frame). Pixel-space lookup, so it's exact and scroll-correct; the widget arms consume `pending_click` as they repaint.
         let mousedown = self.events.iter().rev().find_map(|e| match e {
             InputEvent::MouseDown { x, y } => Some((*x, *y)),
             _ => None,
@@ -534,8 +520,7 @@ impl VM {
             let hit = self.canvas.hit_at_screen_ru(x, y);
             self.pending_click = hit; // consumed by button arms (any widget id)
             self.pressed_widget = hit; // held colour while the pointer is down on it
-            // Focus follows text inputs only; clicking a button or bare canvas blurs (so the blinkey
-            // never spins on a non-editable target).
+            // Focus follows text inputs only; clicking a button or bare canvas blurs (so the blinkey never spins on a non-editable target).
             self.focused_widget = match hit {
                 Some(id) if self.text_inputs.contains_key(&id) => {
                     if let Some(state) = self.text_inputs.get_mut(&id) {
@@ -1282,8 +1267,7 @@ impl VM {
                             "d" => {
                                 // Pop cols*rows cell values from stack
                                 // String → Text cell
-                                // rou(_, _, label, variant, colour) → Button: pop action_url, id
-                                // roq(_, _, placeholder, colour) → TextInput: pop id
+                                // rou(_, _, label, variant, colour) → Button: pop action_url, id roq(_, _, placeholder, colour) → TextInput: pop id
                                 let count = cols * rows;
                                 if count == 0 {
                                     return Err(
@@ -2314,8 +2298,7 @@ impl VM {
                         CellContent::Text(s) | CellContent::Styled(s, _, _) => s.as_str(),
                         CellContent::Button { label, .. } => label.as_str(),
                         CellContent::TextInput { placeholder, .. } => placeholder.as_str(),
-                        // Image fills its cell (square, sized by the VM); no text to measure, so it
-                        // contributes no intrinsic column width — set the column via col_widths.
+                        // Image fills its cell (square, sized by the VM); no text to measure, so it contributes no intrinsic column width — set the column via col_widths.
                         CellContent::Image(_) | CellContent::SubTable { .. } => "",
                     };
                     let font = self.font_cache.get(&font_key).unwrap();
@@ -2490,8 +2473,7 @@ impl VM {
             row_tops.push(row_tops[row] + row_heights[row]);
         }
 
-        // Front-to-back draw order (fluor `under` compositing): cells first (text/widgets are the
-        // frontmost layer), then grid lines behind them, then row backgrounds behind everything.
+        // Front-to-back draw order (fluor `under` compositing): cells first (text/widgets are the frontmost layer), then grid lines behind them, then row backgrounds behind everything.
         // The photon noise backdrop lands last of all, in Canvas::to_rgba_bytes.
 
         // Draw cells (skip when measuring only)
@@ -2577,9 +2559,7 @@ impl VM {
                         }
 
                         CellContent::Image(key) => {
-                            // Square icon sized to the smaller padded cell dimension, centred in the
-                            // cell. draw_image blits the decoded avatar or a placeholder + queues the
-                            // fetch. cell_center/padded_* are the same rects the text arm uses.
+                            // Square icon sized to the smaller padded cell dimension, centred in the cell. draw_image blits the decoded avatar or a placeholder + queues the fetch. cell_center/padded_* are the same rects the text arm uses.
                             let side = if padded_w.to_f32() <= padded_h.to_f32() {
                                 padded_w
                             } else {
@@ -2627,8 +2607,7 @@ impl VM {
                             });
 
                             // fluor Button — pill + AA. The capsule colour drives the resting fill
-                            // (None on extract failure → fluor's default theme fill); hover/pressed
-                            // fold into the baked fill. fluor stamps `widget_id` into the hit_map.
+                            // (None on extract failure → fluor's default theme fill); hover/pressed fold into the baked fill. fluor stamps `widget_id` into the hit_map.
                             let fill = crate::renderer::extract_colour_u32(colour).ok();
                             let hovered = self.hovered_widget == Some(widget_id);
                             let pressed = self.pressed_widget == Some(widget_id);
@@ -3388,8 +3367,7 @@ impl VM {
     pub fn set_mouse(&mut self, mouse_x: ScalarF4E4, mouse_y: ScalarF4E4) {
         self.mouse_x = mouse_x;
         self.mouse_y = mouse_y;
-        // Track the hovered button off the standing hit_map. Text inputs aren't hover targets, so a
-        // pointer over one reads as "no hover" (keeps repaints to genuine button enter/leave).
+        // Track the hovered button off the standing hit_map. Text inputs aren't hover targets, so a pointer over one reads as "no hover" (keeps repaints to genuine button enter/leave).
         self.hovered_widget = match self.canvas.hit_at_screen_ru(mouse_x, mouse_y) {
             Some(id) if self.text_inputs.contains_key(&id) => None,
             other => other,
@@ -3474,8 +3452,7 @@ impl VM {
         self.text_inputs.get(&id)
     }
 
-    /// Cursor kind under a screen-space RU point, resolved via the per-pixel hit_map: a text-input
-    /// silhouette → `Text`, any other widget → `Pointer`, bare canvas → `Default`.
+    /// Cursor kind under a screen-space RU point, resolved via the per-pixel hit_map: a text-input silhouette → `Text`, any other widget → `Pointer`, bare canvas → `Default`.
     pub fn cursor_kind_at(&self, x: ScalarF4E4, y: ScalarF4E4) -> CursorKind {
         match self.canvas.hit_at_screen_ru(x, y) {
             Some(id) if self.text_inputs.contains_key(&id) => CursorKind::Text,
@@ -3486,9 +3463,7 @@ impl VM {
 
     /// Draw a text input widget's visual content (border + text + cursor).
     /// Shared between full render and differential rerender.
-    /// Paint a text input via the fluor `Textbox` widget (pill, AA edges, focus glow, wave
-    /// blinkey). The VM's `TextInputState` stays the source of truth for content/cursor; the
-    /// widget renders it. The blinkey is owned by the widget — `Canvas::flip_textbox_blinkey`
+    /// Paint a text input via the fluor `Textbox` widget (pill, AA edges, focus glow, wave blinkey). The VM's `TextInputState` stays the source of truth for content/cursor; the widget renders it. The blinkey is owned by the widget — `Canvas::flip_textbox_blinkey`
     /// animates it, so this never returns cursor coordinates (the old hand-rolled path did).
     #[allow(clippy::too_many_arguments)]
     fn draw_text_input_visual(
@@ -3520,20 +3495,16 @@ impl VM {
 
     /// Differential rerender — update only widget visuals without re-executing VM.
     ///
-    /// Processes keyboard/mouse events to update widget state, then redraws
-    /// only the widget regions using cached background pixels. Returns true
-    /// if any widget was actually redrawn.
+    /// Processes keyboard/mouse events to update widget state, then redraws only the widget regions using cached background pixels. Returns true if any widget was actually redrawn.
     ///
-    /// Use for keystrokes and cursor blinks. Use full `rerun()` for button clicks
-    /// that need post-table stack processing (actions).
+    /// Use for keystrokes and cursor blinks. Use full `rerun()` for button clicks that need post-table stack processing (actions).
     pub fn rerun_widgets(&mut self) -> Result<bool, String> {
         if self.widget_snapshots.is_empty() {
             return Ok(false);
         }
 
         // Process focus changes from mouse events — sample the standing hit_map (screen pixel space)
-        // rather than a re-derived rect, matching the full-render path in `reset`. Focus follows text
-        // inputs only.
+        // rather than a re-derived rect, matching the full-render path in `reset`. Focus follows text inputs only.
         for event in &self.events {
             if let InputEvent::MouseDown { x, y } = event {
                 self.focused_widget = match self.canvas.hit_at_screen_ru(*x, *y) {
@@ -3615,17 +3586,13 @@ impl VM {
             }
         }
 
-        // Restore each widget's saved background and redraw it with current state. Text inputs pick
-        // up keystrokes/focus; buttons pick up hover/pressed (the fill re-bakes only on a genuine
-        // state change, so idle buttons just re-blit their cached pill). This is the cheap path that
-        // lets hover follow the cursor without re-executing the whole capsule.
+        // Restore each widget's saved background and redraw it with current state. Text inputs pick up keystrokes/focus; buttons pick up hover/pressed (the fill re-bakes only on a genuine state change, so idle buttons just re-blit their cached pill). This is the cheap path that lets hover follow the cursor without re-executing the whole capsule.
         let snapshots = std::mem::take(&mut self.widget_snapshots);
         for snap in &snapshots {
             self.canvas.restore_region(&snap.bg_pixels, snap.px_x, snap.px_y, snap.px_w, snap.px_h);
             match &snap.kind {
                 WidgetSnapshotKind::TextInput { placeholder } => {
-                    // The fluor Textbox owns the blinkey (drawn inside draw_text_input_visual when
-                    // focused), so no separate wave add/sub bookkeeping here.
+                    // The fluor Textbox owns the blinkey (drawn inside draw_text_input_visual when focused), so no separate wave add/sub bookkeeping here.
                     let is_focused = self.focused_widget == Some(snap.widget_id);
                     if let Some(state) = self.text_inputs.get(&snap.widget_id) {
                         Self::draw_text_input_visual(

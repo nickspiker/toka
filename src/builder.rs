@@ -205,8 +205,7 @@ fn emit_op(bytecode: &mut Vec<u8>, a: u8, b: u8) {
 
 /// Builder for bitpacked grid masks (per-segment border control in tables).
 ///
-/// Creates a compact byte blob encoding which horizontal and vertical
-/// border segments to draw. Bits are packed MSB-first, row-major.
+/// Creates a compact byte blob encoding which horizontal and vertical border segments to draw. Bits are packed MSB-first, row-major.
 ///
 /// # Example: header-only border (line under header row)
 /// ```rust
@@ -1045,8 +1044,7 @@ impl Program {
 
     /// Draw a table with some cells marked as widget slots.
     /// `query_cells` is a list of `(row, col)` pairs (0-indexed, row 0 = header).
-    /// After drawing, the table pushes `font, pos(c44), size(c44), colour` for each
-    /// queried cell onto the stack (first cell on top). Use with `cell_button()` etc.
+    /// After drawing, the table pushes `font, pos(c44), size(c44), colour` for each queried cell onto the stack (first cell on top). Use with `cell_button()` etc.
     pub fn draw_table_widget(
         self,
         headers: &[&str],

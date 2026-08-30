@@ -1,8 +1,6 @@
 //! Direct VSF ro* to Canvas rendering
 //!
-//! This module renders VSF renderable object types (rob, roc, row, etc.) directly
-//! to the Canvas without any intermediate representation. Transforms are tracked
-//! as we traverse the scene graph hierarchy.
+//! This module renders VSF renderable object types (rob, roc, row, etc.) directly to the Canvas without any intermediate representation. Transforms are tracked as we traverse the scene graph hierarchy.
 
 use crate::drawing::Canvas;
 use spirix::{CircleF4E4, ScalarF4E4};
@@ -69,8 +67,7 @@ impl RenderContext {
             "info"
         );
 
-        // Front-to-back (fluor under-blend): children sit on top of the parent box, so they
-        // paint FIRST; the parent fill then lands behind them.
+        // Front-to-back (fluor under-blend): children sit on top of the parent box, so they paint FIRST; the parent fill then lands behind them.
         for child in children {
             self.render(child, canvas)?;
         }
@@ -179,8 +176,7 @@ impl RenderContext {
 /// Extract a VSF colour as a fluor-native α+darkness pixel (`0xααRRGGBB`, RGB = 255−visible).
 ///
 /// Pipeline: VSF colour → linear sRGB → sRGB OETF → u8 → `pack_argb` (flips to darkness).
-/// This is the single colour funnel for the whole renderer; every primitive draws with the
-/// value it returns, so the format lives in exactly one place.
+/// This is the single colour funnel for the whole renderer; every primitive draws with the value it returns, so the format lives in exactly one place.
 pub fn extract_colour_u32(vsf: &VsfType) -> Result<u32, String> {
     let (r, g, b) = vsf
         .to_srgb_u8_s44()

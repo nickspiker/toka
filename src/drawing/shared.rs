@@ -231,9 +231,7 @@ pub struct TableSettings {
 
 /// Bitpacked per-segment border mask.
 ///
-/// Each bit controls one border segment. Horizontal segments are
-/// the lines between rows (including top/bottom edges), spanning
-/// each column. Vertical segments are the lines between columns
+/// Each bit controls one border segment. Horizontal segments are the lines between rows (including top/bottom edges), spanning each column. Vertical segments are the lines between columns
 /// (including left/right edges), spanning each row.
 ///
 /// Bits are packed MSB-first, row-major within each mask.

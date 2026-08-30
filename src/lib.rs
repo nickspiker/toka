@@ -59,8 +59,7 @@
 //!
 //! All arithmetic uses Spirix (two's complement floating point) instead of IEEE-754, providing fast and deterministic results across all platforms.
 //!
-//! Drawing operations use viewport-relative coordinates (0.0-1.0) for
-//! resolution-independent rendering.
+//! Drawing operations use viewport-relative coordinates (0.0-1.0) for resolution-independent rendering.
 //!
 //! ## License
 //!
@@ -187,14 +186,12 @@ pub mod wasm {
         }
 
         /// Drain the resource keys the last render couldn't resolve, as a JS string array. For each,
-        /// the host builds a VSF request (`build_resource_request`), POSTs it, and returns the bytes
-        /// via `provide_resource`, then re-renders. Empty array = nothing to fetch (converged).
+        /// the host builds a VSF request (`build_resource_request`), POSTs it, and returns the bytes via `provide_resource`, then re-renders. Empty array = nothing to fetch (converged).
         pub fn take_pending_requests(&mut self) -> Vec<String> {
             self.vm.take_pending_requests()
         }
 
-        /// Build the VSF-framed request the host POSTs to the worker for one resource `key`. VSF
-        /// construction stays in wasm so the host only shuttles opaque bytes over the wire.
+        /// Build the VSF-framed request the host POSTs to the worker for one resource `key`. VSF construction stays in wasm so the host only shuttles opaque bytes over the wire.
         pub fn build_resource_request(&self, key: &str) -> Vec<u8> {
             vsf::vsf_builder::VsfBuilder::new()
                 .provenance_only()
@@ -206,8 +203,7 @@ pub mod wasm {
                 .unwrap_or_default()
         }
 
-        /// Hand back a fetched resource: `key` is the request key, `vsf_bytes` the worker's VSF
-        /// response (a VSF image file). Stored raw; decoded on the next draw_image that needs it.
+        /// Hand back a fetched resource: `key` is the request key, `vsf_bytes` the worker's VSF response (a VSF image file). Stored raw; decoded on the next draw_image that needs it.
         pub fn provide_resource(&mut self, key: String, vsf_bytes: Vec<u8>) {
             self.vm.provide_resource(key, vsf_bytes);
         }
@@ -434,8 +430,7 @@ pub mod wasm {
             self.vm.focused_widget().map(|id| id as i32).unwrap_or(-1)
         }
 
-        /// Get the hovered widget ID (or -1 if none). The host polls this after `set_mouse` to
-        /// decide whether a hover repaint (differential) is needed.
+        /// Get the hovered widget ID (or -1 if none). The host polls this after `set_mouse` to decide whether a hover repaint (differential) is needed.
         pub fn hovered_widget(&self) -> i32 {
             self.vm.hovered_widget().map(|id| id as i32).unwrap_or(-1)
         }
@@ -489,8 +484,7 @@ pub mod wasm {
 
     /// Inspect a VSF capsule and return formatted output (vsfinfo style, no ANSI colours)
     ///
-    /// Returns the same inspector view as vsfinfo, but without ANSI colour codes
-    /// so it displays properly in browser console.
+    /// Returns the same inspector view as vsfinfo, but without ANSI colour codes so it displays properly in browser console.
     #[wasm_bindgen]
     pub fn inspect_capsule(capsule_data: Vec<u8>) -> Result<String, String> {
         use vsf::inspect::inspect_vsf_plain;

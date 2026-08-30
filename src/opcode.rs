@@ -311,9 +311,7 @@ pub enum Opcode {
     /// VSF: {tb}
     draw_table,
 
-    /// Draw image: pop size (c44), pos (c44), key (string). The VM resolves `key` against its
-    /// resource table — blits the decoded pixels if present, else records the key as a pending
-    /// host request and draws a placeholder. See `Vm::draw_image` / the resource-fetch effect.
+    /// Draw image: pop size (c44), pos (c44), key (string). The VM resolves `key` against its resource table — blits the decoded pixels if present, else records the key as a pending host request and draws a placeholder. See `Vm::draw_image` / the resource-fetch effect.
     /// VSF: {di}
     draw_image,
 
