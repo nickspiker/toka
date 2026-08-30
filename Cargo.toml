@@ -1,6 +1,6 @@
 [package]
 name = "toka"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2021"
 authors = ["Nick Spiker <fractaldecoder@proton.me>"]
 description = "Capability-bounded stack VM for secure distributed computing"
@@ -18,10 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 # Core dependencies for deterministic computation
-spirix = { path = "../spirix" }
-fontdue = { package = "fontdue-spirix", path = "../fontdue-spirix", default-features = false, optional = true }
+spirix = { version = "0.1.1", path = "../spirix" }
+fontdue = { package = "fontdue-spirix", version = "0.9.3-spirix.2", path = "../fontdue-spirix", default-features = false, optional = true }
 blake3 = "1"
-vsf = { path = "../vsf", default-features = false, features = ["spirix", "crypto", "inspect", "handle"] }
+vsf = { version = "0.9.3", path = "../vsf", default-features = false, features = ["spirix", "crypto", "inspect", "handle"] }
 bytemuck = "1.14"
 
 # getrandom with WASM support - Both 0.2 (js) and 0.3 (wasm_js) are used by dependencies
@@ -39,10 +39,10 @@ features = ["wasm_js"]
 # fluor renders headless here (paint + text + canvas — no host, no icon/rav1d). rayon only off-wasm:
 # wasm32-unknown-unknown has no threads, and fluor's row loops fall back to sequential without it.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-fluor = { path = "../fluor", optional = true, default-features = false, features = ["std", "text", "simd", "rayon"] }
+fluor = { version = "0.0.4", path = "../fluor", optional = true, default-features = false, features = ["std", "text", "simd", "rayon"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-fluor = { path = "../fluor", optional = true, default-features = false, features = ["std", "text", "simd"] }
+fluor = { version = "0.0.4", path = "../fluor", optional = true, default-features = false, features = ["std", "text", "simd"] }
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["CanvasRenderingContext2d", "HtmlCanvasElement", "ImageData", "console"] }
 console_error_panic_hook = { version = "0.1", optional = true }
