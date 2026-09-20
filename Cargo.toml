@@ -68,3 +68,5 @@ runtime = ["dep:fontdue", "dep:fluor", "vsf/image-decode"]
 # patch only applies when toka is the build root (browser build); the worker build ignores it.
 [patch.crates-io]
 rav1d = { path = "vendor/rav1d" }
+# fontdue-spirix reaches spirix through its ttf-parser fork by crates.io version; without this the browser build sees two `Scalar` types (the sibling path one and the registry one) and the outline-builder trait impls fail to typecheck. One spirix: the sibling checkout, same as every other dep above.
+spirix = { path = "../spirix" }

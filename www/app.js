@@ -200,7 +200,7 @@ function setupCanvas() {
         if (!consoleEl.classList.contains('visible')) return;
 
         const [r, g, b, a] = ctx.getImageData(e.offsetX, e.offsetY, 1, 1).data;
-        const hexStr = [r, g, b, a].map(v => v.toString(16).padStart(2, '0').toUpperCase()).join(' ');
+        const hexStr = [r, g, b, a].map(v => v.toString(16).padStart(2, '0')).join(' '); // lowercase hex: the portal folds NO strings, and the deploy gate refuses any case-mapping call so the handle rule can never regress by accident
         swatch.style.background = `rgba(${r},${g},${b},${a / 255})`;
         hex.textContent = hexStr;
         coords.textContent = `x:${e.offsetX} y:${e.offsetY}`;
