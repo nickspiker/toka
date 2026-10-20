@@ -1,6 +1,6 @@
 [package]
 name = "toka"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2021"
 authors = ["Nick Spiker <fractaldecoder@proton.me>"]
 description = "Capability-bounded stack VM for secure distributed computing"
@@ -39,10 +39,10 @@ features = ["wasm_js"]
 # fluor renders headless here (paint + text + canvas — no host, no icon/rav1d). rayon only off-wasm:
 # wasm32-unknown-unknown has no threads, and fluor's row loops fall back to sequential without it.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-fluor = { version = "0.0.4", path = "../fluor", optional = true, default-features = false, features = ["std", "text", "simd", "rayon"] }
+fluor = { version = "0.0.5", path = "../fluor", optional = true, default-features = false, features = ["std", "text", "simd", "rayon"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-fluor = { version = "0.0.4", path = "../fluor", optional = true, default-features = false, features = ["std", "text", "simd"] }
+fluor = { version = "0.0.5", path = "../fluor", optional = true, default-features = false, features = ["std", "text", "simd"] }
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["CanvasRenderingContext2d", "HtmlCanvasElement", "ImageData", "console"] }
 console_error_panic_hook = { version = "0.1", optional = true }
