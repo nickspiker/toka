@@ -12,10 +12,10 @@
 //!   Row 7: Leading test — tight (0.8), normal (1.0), loose (1.5)
 
 use spirix::{CircleF4E4, ScalarF4E4};
-use toka::builder::Program;
+use toka::builder::{filled_box, Program};
 use toka::capsule::CapsuleBuilder;
 use vsf::handle;
-use vsf::types::{Fill, VsfType};
+use vsf::types::VsfType;
 
 const FONT: &[u8] = include_bytes!("/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf");
 
@@ -63,11 +63,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     p = p.lg(0).ps_c44(label_x, -0.18).ps_s44(label_size).ps_str("ALPHA")
         .ps(&dim.flatten()).dt_left();
 
-    let blue_box = VsfType::rob(
+    let blue_box = filled_box(
         CircleF4E4::from((ScalarF4E4::from_f32(0.05), ScalarF4E4::from_f32(-0.16))),
         CircleF4E4::from((ScalarF4E4::from_f32(0.85), ScalarF4E4::from_f32(0.06))),
-        Fill::Solid(Box::new(VsfType::rcb)),
-        None, vec![],
+        VsfType::rcb,
     );
     p = p.ps(&blue_box.flatten()).rl();
 
@@ -84,11 +83,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     p = p.lg(0).ps_c44(label_x, -0.06).ps_s44(label_size).ps_str("ALIGN")
         .ps(&dim.flatten()).dt_left();
 
-    let guide = |x: f32| VsfType::rob(
+    let guide = |x: f32| filled_box(
         CircleF4E4::from((ScalarF4E4::from_f32(x), ScalarF4E4::from_f32(-0.04))),
         CircleF4E4::from((ScalarF4E4::from_f32(0.002), ScalarF4E4::from_f32(0.06))),
-        Fill::Solid(Box::new(VsfType::ra([255, 80, 80, 120]))),
-        None, vec![],
+        VsfType::ra([255, 80, 80, 120]),
     );
     p = p.ps(&guide(-0.30).flatten()).rl();
     p = p.ps(&guide(0.0).flatten()).rl();
@@ -119,11 +117,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wrap_text = "The quick brown fox jumps over the lazy dog near the riverbank.";
 
     // Wrap box outlines (visual guides for the wrap region)
-    let wrap_box = |x: f32| VsfType::rob(
+    let wrap_box = |x: f32| filled_box(
         CircleF4E4::from((ScalarF4E4::from_f32(x), ScalarF4E4::from_f32(0.26))),
         CircleF4E4::from((ScalarF4E4::from_f32(0.28), ScalarF4E4::from_f32(0.12))),
-        Fill::Solid(Box::new(VsfType::ra([50, 50, 50, 255]))),
-        None, vec![],
+        VsfType::ra([50, 50, 50, 255]),
     );
     p = p.ps(&wrap_box(-0.30).flatten()).rl();
     p = p.ps(&wrap_box(0.0).flatten()).rl();

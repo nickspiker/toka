@@ -18,7 +18,7 @@
 //! ```
 
 use spirix::*;
-use vsf::types::{ButtonVariant, VsfType};
+use vsf::types::{Button, ButtonVariant, Input, Nums, Paint, VsfType};
 
 /// Cell content for mixed-content tables (text, buttons, text inputs).
 ///
@@ -83,6 +83,25 @@ pub enum CellData<'a> {
     },
 }
 
+
+/// A button table cell: the label and colour ride in an `rou`; the table lays it out, so its geometry is empty.
+fn button_cell(label: &str, colour: VsfType) -> VsfType {
+    VsfType::rou(Box::new(Button {
+        geometry: Nums::centre_half_f32([0., 0.], [0., 0.]),
+        label: Box::new(VsfType::a(label.to_string())),
+        variant: ButtonVariant::Filled,
+        paint: Paint::colour(colour).expect("button cell: not a colour"),
+    }))
+}
+
+/// A text-input table cell, like [`button_cell`].
+fn input_cell(placeholder: &str, colour: VsfType) -> VsfType {
+    VsfType::roq(Box::new(Input {
+        geometry: Nums::centre_half_f32([0., 0.], [0., 0.]),
+        placeholder: Box::new(VsfType::a(placeholder.to_string())),
+        paint: Paint::colour(colour).expect("text input cell: not a colour"),
+    }))
+}
 /// Build a `VsfType::roa` from sub-table cell data.
 ///
 /// Children layout: [cells (cols × total_rows), settings tags...]
@@ -130,11 +149,7 @@ fn build_roa_from_cell_data(
                     let mut ptr = 0;
                     let colour_vsf = vsf::parse::parse(colour, &mut ptr)
                         .expect("SubTable Button: invalid colour bytes");
-                    children.push(VsfType::rou(
-                        CircleF4E4::ZERO, CircleF4E4::ZERO,
-                        label.to_string(), ButtonVariant::Filled,
-                        Box::new(colour_vsf),
-                    ));
+                    children.push(button_cell(label, colour_vsf));
                     children.push(VsfType::u5(*id));
                     children.push(VsfType::a(action.to_string()));
                 }
@@ -142,11 +157,7 @@ fn build_roa_from_cell_data(
                     let mut ptr = 0;
                     let colour_vsf = vsf::parse::parse(colour, &mut ptr)
                         .expect("SubTable TextInput: invalid colour bytes");
-                    children.push(VsfType::roq(
-                        CircleF4E4::ZERO, CircleF4E4::ZERO,
-                        placeholder.to_string(),
-                        Box::new(colour_vsf),
-                    ));
+                    children.push(input_cell(placeholder, colour_vsf));
                     children.push(VsfType::u5(*id));
                 }
                 CellData::SubTable { headers: sh, rows: sr, col_widths: sw, h_align: sa,
@@ -194,7 +205,7 @@ fn build_roa_from_cell_data(
         children.push(VsfType::s44(ScalarF4E4::from_f32(pad)));
     }
 
-    VsfType::roa(cols, total_rows, children)
+    VsfType::roa(Box::new(vsf::types::Grid { cols: vsf::types::Num::uint(cols as u64), rows: vsf::types::Num::uint(total_rows as u64), children }))
 }
 
 /// Emit a VSF-encoded opcode: `{ab}` -> 4 bytes
@@ -1337,11 +1348,7 @@ impl Program {
                         let mut ptr = 0;
                         let colour_vsf = vsf::parse::parse(colour, &mut ptr)
                             .expect("CellData::Button: invalid colour bytes");
-                        let rou = VsfType::rou(
-                            CircleF4E4::ZERO, CircleF4E4::ZERO,
-                            label.to_string(), ButtonVariant::Filled,
-                            Box::new(colour_vsf),
-                        );
+                        let rou = button_cell(label, colour_vsf);
                         emit_op(&mut self.bytecode, b'p', b's');
                         self.bytecode.extend_from_slice(&rou.flatten());
                     }
@@ -1352,11 +1359,7 @@ impl Program {
                         let mut ptr = 0;
                         let colour_vsf = vsf::parse::parse(colour, &mut ptr)
                             .expect("CellData::TextInput: invalid colour bytes");
-                        let roq = VsfType::roq(
-                            CircleF4E4::ZERO, CircleF4E4::ZERO,
-                            placeholder.to_string(),
-                            Box::new(colour_vsf),
-                        );
+                        let roq = input_cell(placeholder, colour_vsf);
                         emit_op(&mut self.bytecode, b'p', b's');
                         self.bytecode.extend_from_slice(&roq.flatten());
                     }
@@ -1744,4 +1747,31 @@ mod tests {
             _ => panic!("Expected s44"),
         }
     }
+}
+
+/// A filled box from its centre and full width and height, in the caller's frame: an `rob` whose geometry is Spirix (centre, half-size). Panics if `colour` is not a colour.
+pub fn filled_box(centre: CircleF4E4, size: CircleF4E4, colour: VsfType) -> VsfType {
+    let half = ScalarF4E4::from(0.5);
+    let geometry = vsf::Tensor::new(vec![2, 2], vec![centre.r(), centre.i(), size.r() * half, size.i() * half]);
+    VsfType::rob(Box::new(vsf::types::Rect {
+        geometry: Nums::new(VsfType::t_s44(geometry)).expect("t_s44 is a number tensor"),
+        rotation: None,
+        corners: None,
+        exponent: None,
+        fill: Some(Paint::colour(colour).expect("filled_box: not a colour")),
+        stroke: None,
+    }))
+}
+
+/// A filled circle: an `roe` with equal Spirix radii. Panics if `colour` is not a colour.
+pub fn filled_circle(centre: CircleF4E4, radius: ScalarF4E4, colour: VsfType) -> VsfType {
+    let geometry = vsf::Tensor::new(vec![2, 2], vec![centre.r(), centre.i(), radius, radius]);
+    VsfType::roe(Box::new(vsf::types::Ellipse {
+        geometry: Nums::new(VsfType::t_s44(geometry)).expect("t_s44 is a number tensor"),
+        rotation: None,
+        start: None,
+        sweep: None,
+        fill: Some(Paint::colour(colour).expect("filled_circle: not a colour")),
+        stroke: None,
+    }))
 }

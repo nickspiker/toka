@@ -1,39 +1,34 @@
 //! Test example for ro* scene graph types
 //!
-//! Creates a red box with a blue circle child, wrapped in a transform group.
-//! This demonstrates the proper ro* architecture (rob, roc, row) instead of the vt hack.
+//! Creates a blue circle behind a red box, inside a node that moves and turns them.
+//! This demonstrates the ro* scene graph: a node (ron) holding an ellipse (roe) and a box (rob).
 
 use spirix::{CircleF4E4, ScalarF4E4};
-use toka::builder::Program;
+use toka::builder::{filled_box, filled_circle, Program};
 use toka::capsule::CapsuleBuilder;
-use vsf::types::{Fill, VsfType};
+use vsf::types::{Node, VsfType};
 
 const FONT: &[u8] = include_bytes!("/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf");
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Blue circle (standalone, renders first = behind)
-    let blue_circle = VsfType::roc(
-        CircleF4E4::from((0, 0)),            // center
-        ScalarF4E4::from(0.3),               // radius
-        Fill::Solid(Box::new(VsfType::rcb)), // blue fill
-        None,                                // no stroke
+    let blue_circle = filled_circle(
+        CircleF4E4::from((0, 0)),
+        ScalarF4E4::from(0.3),
+        VsfType::rcb,
     );
 
     // Red box (no children, renders second = on top)
-    let red_box = VsfType::rob(
-        CircleF4E4::from((0, 0)), // pos (center)
-        CircleF4E4::from((1, 1)), // size (2x2 in RU)
-        Fill::Solid(Box::new(VsfType::ra([255, 0, 0, 127]))),
-        None,   // no stroke
-        vec![], // no children
+    let red_box = filled_box(
+        CircleF4E4::from((0, 0)), // centre
+        CircleF4E4::from((1, 1)), // full width and height (1×1 RU)
+        VsfType::ra([255, 0, 0, 127]),
     );
 
-    // Both as siblings - circle first = renders behind red box
-    let children_node = VsfType::ron(
-        CircleF4E4::from((0, 0)),   // pos (unused for container)
-        CircleF4E4::from((0, 0)),   // size (unused for container)
-        vec![blue_circle, red_box], // circle behind, box on top
-    );
+    // Both as siblings, in painter's order: circle first = behind the red box
+    let mut children_node = Node::new();
+    children_node.children = vec![blue_circle, red_box];
+    let children_node = VsfType::ron(Box::new(children_node));
 
     // Reactive bytecode: builds transform from scroll_y at runtime
     let bytecode = Program::new()
@@ -44,12 +39,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ps_c44(0.1, 0.1)
         // Push rotate (from scroll wheel)
         .sy() // scroll_y context variable
-        .ps_s44(0.001) // Scale factor
-        .ml() // rotation = scroll_y * 0.001
+        .ps_s44(1. / (1 << 12) as f32) // turns per scroll step
+        .ml() // rotation = scroll_y / 4096 turns
         // Push children (ron node)
         .ps(&children_node.flatten())
-        // Build row from stack and render
-        .kw() // Build row from stack
+        // Build the moving node from the stack and render
+        .kw() // Build node from stack
         .rl() // Render
         // Draw text "Box" over the scene
         .ps_bytes(FONT)                  // font bytes
@@ -69,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(output_path, &capsule)?;
 
     println!("✓ Created {} ({} bytes)", output_path, capsule.len());
-    println!("  Scene graph: row → ron → [roc, rob]");
+    println!("  Scene graph: ron (moved) → ron → [roe, rob]");
     println!("  Transform: translate + rotate");
     println!("  Shapes: blue circle (behind) + red box (on top)");
 

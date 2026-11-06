@@ -100,17 +100,7 @@ impl RuCoords {
     #[inline] pub fn ru_to_px_hf(&self, h: ScalarF4E4) -> f32 { (h * self.span * self.ru).to_f32() }
 }
 
-/// Text layout settings — mirrors VSF TextStyle tags.
-///
-/// Tags (single lowercase ASCII):
-///   `l` — align left (flag)
-///   `r` — align right (flag)
-///   `e` + s44 — leading (line height multiplier)
-///   `k` + s44 — kerning (letter spacing in RU)
-///   `w` + s44 — weight (100–900, variable font axis)
-///   `i` + s44 — tilt (italic angle in degrees, variable font axis)
-///   `x` + s44 — wrap width (box width in RU)
-///   `f` + 32  — font hash (handled separately via font_key)
+/// Text layout settings — mirrors the attributes of a VSF `rot` (vsf::types::Text): align (`j`), leading (`e`), letter spacing (`s`), weight (`w`), tilt (`i`), wrap width (`x`); the font hash (`h`) is handled separately via font_key.
 ///
 /// Defaults: center-aligned, no wrap, default weight/leading.
 pub struct TextSettings {
@@ -142,18 +132,16 @@ impl Default for TextSettings {
 }
 
 impl TextSettings {
-    /// Build from a VSF TextStyle, if present.
-    #[cfg(feature = "spirix")]
-    pub fn from_vsf_style(style: &Option<vsf::types::toka_tree::TextStyle>) -> Self {
+    /// Build from a VSF text object's attributes. Tilt arrives in turns and is kept here in degrees.
+    pub fn from_vsf_text(text: &vsf::types::Text) -> Self {
+        let s44 = |n: &vsf::types::Num| ScalarF4E4::from(n.to_f64());
         let mut s = Self::default();
-        if let Some(ts) = style {
-            if let Some(a) = ts.align { s.align = a; }
-            if let Some(e) = ts.leading { s.leading = e; }
-            if let Some(k) = ts.kerning { s.kerning = k; }
-            s.weight = ts.weight;
-            s.tilt = ts.tilt;
-            s.wrap = ts.wrap;
-        }
+        if let Some(a) = text.align { s.align = a.code(); }
+        if let Some(e) = &text.leading { s.leading = s44(e); }
+        if let Some(k) = &text.spacing { s.kerning = s44(k); }
+        s.weight = text.weight.as_ref().map(s44);
+        s.tilt = text.tilt.as_ref().map(|t| ScalarF4E4::from(t.to_f64() * 360.));
+        s.wrap = text.wrap.as_ref().map(s44);
         s
     }
 

@@ -1,46 +1,56 @@
 //! Direct VSF ro* to Canvas rendering
 //!
-//! This module renders VSF renderable object types (rob, roc, row, etc.) directly to the Canvas without any intermediate representation. Transforms are tracked as we traverse the scene graph hierarchy.
+//! This module renders VSF renderable objects (`rob`, `roe`, `ron`) directly to the Canvas without any intermediate representation. Each `ron` node is a frame: its translate, rotation and scale map its children into its parent's units, and the outermost frame is toka's RU. Angles arrive in turns.
 
 use crate::drawing::Canvas;
 use spirix::{CircleF4E4, ScalarF4E4};
-use vsf::types::{Fill, Transform, VsfType};
+use vsf::types::{Ellipse, Node, Paint, Rect, VsfType};
 
-/// Rendering context with transform stack
+/// One node's frame: a point p in it is at translate + R(rotation)·(scale ⊙ p) in its parent's.
+struct Frame {
+    translate: [f64; 2],
+    rotation: f64,
+    scale: [f64; 2],
+}
+
+impl Frame {
+    fn of(node: &Node) -> Frame {
+        let translate = node.translate.as_ref().map_or([0., 0.], |t| {
+            let v = t.to_f64();
+            [v[0], v[1]]
+        });
+        let rotation = node.rotation.as_ref().map_or(0., |r| r.to_f64());
+        let scale = node.scale.as_ref().map_or([1., 1.], |s| s.to_f64());
+        Frame { translate, rotation, scale }
+    }
+}
+
+/// Rendering context with the stack of frames from the root down.
 pub struct RenderContext {
-    /// Stack of transforms from parent nodes
-    transform_stack: Vec<Transform>,
+    frames: Vec<Frame>,
 }
 
 impl RenderContext {
     /// Create a new rendering context
     pub fn new() -> Self {
-        RenderContext {
-            transform_stack: Vec::new(),
-        }
+        RenderContext { frames: Vec::new() }
     }
 
     /// Render a VSF renderable object to canvas
     pub fn render(&mut self, vsf: &VsfType, canvas: &mut Canvas) -> Result<(), String> {
         match vsf {
-            VsfType::rob(pos, size, fill, stroke, children) => {
-                self.render_box(pos, size, fill, stroke, children, canvas)
-            }
-            VsfType::roc(center, radius, fill, stroke) => {
-                self.render_circle(center, radius, fill, stroke, canvas)
-            }
-            VsfType::row(transform, children) => {
-                self.transform_stack.push(transform.clone());
-                for child in children {
+            VsfType::rob(rect) => self.render_box(rect, canvas),
+            VsfType::roe(ellipse) => self.render_ellipse(ellipse, canvas),
+            VsfType::ron(node) => {
+                if node.mask.is_some() {
+                    return Err("Masks not implemented yet".to_string());
+                }
+                self.frames.push(Frame::of(node));
+                // Children are in painter's order (later on top); fluor composites front-to-back, so the last child paints first.
+                for child in node.children.iter().rev() {
                     self.render(child, canvas)?;
                 }
-                self.transform_stack.pop();
-                Ok(())
-            }
-            VsfType::ron(_pos, _size, children) => {
-                for child in children {
-                    self.render(child, canvas)?;
-                }
+                self.frames.pop();
                 Ok(())
             }
             _ => Err(format!("Not a renderable type: {:?}", vsf)),
@@ -48,129 +58,76 @@ impl RenderContext {
     }
 
     /// Render a box (rob)
-    fn render_box(
-        &mut self,
-        pos: &CircleF4E4,
-        size: &CircleF4E4,
-        fill: &Fill,
-        stroke: &Option<vsf::types::Stroke>,
-        children: &[VsfType],
-        canvas: &mut Canvas,
-    ) -> Result<(), String> {
-        let world_pos  = self.apply_transforms(*pos);
-        let world_size = self.apply_transforms_size(*size);
-        let rotation   = self.get_cumulative_rotation();
-
-        #[cfg(target_arch = "wasm32")]
-        crate::wasm::js_log(
-            &format!("Rotation angle: {} ({} degrees)", rotation, rotation * 180 / ScalarF4E4::PI),
-            "info"
-        );
-
-        // Front-to-back (fluor under-blend): children sit on top of the parent box, so they paint FIRST; the parent fill then lands behind them.
-        for child in children {
-            self.render(child, canvas)?;
+    fn render_box(&mut self, rect: &Rect, canvas: &mut Canvas) -> Result<(), String> {
+        if rect.corners.is_some() {
+            return Err("Box corners not implemented yet".to_string());
         }
-
-        match fill {
-            Fill::Solid(colour) => {
-                canvas.fill_rotated_rect_ru(world_pos, world_size, rotation, colour)?;
-            }
-            Fill::Gradient(_) => return Err("Gradients not implemented yet".to_string()),
-        }
-
-        if stroke.is_some() {
+        if rect.stroke.is_some() {
             return Err("Strokes not implemented yet".to_string());
         }
-
-        Ok(())
+        let g = rect.geometry.to_f64();
+        let centre = self.to_root([g[0], g[1]]);
+        let half = self.size_to_root([g[2], g[3]]);
+        let turns = self.rotation_to_root(rect.rotation.as_ref().map_or(0., |r| r.to_f64()));
+        let colour = match &rect.fill {
+            None => return Ok(()),
+            Some(Paint::Colour(c)) => c,
+            Some(Paint::Gradient(_)) => return Err("Gradients not implemented yet".to_string()),
+        };
+        let size = c44(2. * half[0], 2. * half[1]);
+        canvas.fill_rotated_rect_ru(c44(centre[0], centre[1]), size, ScalarF4E4::from(turns * core::f64::consts::TAU), colour)
     }
 
-    /// Render a circle (roc)
-    fn render_circle(
-        &mut self,
-        center: &CircleF4E4,
-        radius: &ScalarF4E4,
-        fill: &Fill,
-        stroke: &Option<vsf::types::Stroke>,
-        canvas: &mut Canvas,
-    ) -> Result<(), String> {
-        let world_center = self.apply_transforms(*center);
-        let world_radius = *radius;
-
-        match fill {
-            Fill::Solid(colour) => {
-                canvas.fill_circle(world_center, world_radius, colour)?;
-            }
-            Fill::Gradient(_) => return Err("Gradients not implemented yet".to_string()),
+    /// Render an ellipse (roe): a whole circle or ellipse; rings and sectors are not drawn yet.
+    fn render_ellipse(&mut self, ellipse: &Ellipse, canvas: &mut Canvas) -> Result<(), String> {
+        if ellipse.is_ring() || ellipse.sweep.is_some() {
+            return Err("Rings and sectors not implemented yet".to_string());
         }
-
-        if stroke.is_some() {
+        if ellipse.stroke.is_some() {
             return Err("Strokes not implemented yet".to_string());
         }
-
-        Ok(())
+        let g = ellipse.geometry.to_f64();
+        let centre = self.to_root([g[0], g[1]]);
+        let radii = self.size_to_root([g[2], g[3]]);
+        let colour = match &ellipse.fill {
+            None => return Ok(()),
+            Some(Paint::Colour(c)) => c,
+            Some(Paint::Gradient(_)) => return Err("Gradients not implemented yet".to_string()),
+        };
+        if radii[0] == radii[1] {
+            return canvas.fill_circle(c44(centre[0], centre[1]), ScalarF4E4::from(radii[0]), colour);
+        }
+        let turns = self.rotation_to_root(ellipse.rotation.as_ref().map_or(0., |r| r.to_f64()));
+        if turns != 0. {
+            return Err("Rotated ellipses not implemented yet".to_string());
+        }
+        canvas.fill_ellipse(c44(centre[0], centre[1]), c44(radii[0], radii[1]), colour)
     }
 
-    fn apply_transforms(&self, pos: CircleF4E4) -> CircleF4E4 {
-        let mut result = pos;
-        for transform in &self.transform_stack {
-            result = self.apply_single_transform(result, transform);
+    /// A point in the innermost frame, in root units.
+    fn to_root(&self, p: [f64; 2]) -> [f64; 2] {
+        let mut p = p;
+        for f in self.frames.iter().rev() {
+            let (x, y) = (p[0] * f.scale[0], p[1] * f.scale[1]);
+            let (sin, cos) = (f.rotation * core::f64::consts::TAU).sin_cos();
+            p = [f.translate[0] + x * cos - y * sin, f.translate[1] + x * sin + y * cos];
         }
-        result
+        p
     }
 
-    fn apply_transforms_size(&self, size: CircleF4E4) -> CircleF4E4 {
-        let mut result = size;
-        for transform in &self.transform_stack {
-            if let Some(scale) = transform.scale {
-                result = CircleF4E4::from((result.r() * scale.r(), result.i() * scale.i()));
-            }
-        }
-        result
+    /// A size (half-extents, radii) in the innermost frame, in root units: scaled, never rotated.
+    fn size_to_root(&self, s: [f64; 2]) -> [f64; 2] {
+        self.frames.iter().fold(s, |s, f| [s[0] * f.scale[0].abs(), s[1] * f.scale[1].abs()])
     }
 
-    fn get_cumulative_rotation(&self) -> ScalarF4E4 {
-        let mut total = ScalarF4E4::ZERO;
-        for transform in &self.transform_stack {
-            if let Some(angle) = transform.rotate {
-                total = total + angle;
-            }
-        }
-        total
+    /// A rotation in the innermost frame, in turns, as seen from the root.
+    fn rotation_to_root(&self, turns: f64) -> f64 {
+        self.frames.iter().fold(turns, |t, f| t + f.rotation)
     }
+}
 
-    fn apply_single_transform(&self, pos: CircleF4E4, t: &Transform) -> CircleF4E4 {
-        let mut ru_x = pos.r();
-        let mut ru_y = pos.i();
-
-        if let Some(origin) = t.origin {
-            ru_x = ru_x - origin.r();
-            ru_y = ru_y - origin.i();
-        }
-        if let Some(scale) = t.scale {
-            ru_x = ru_x * scale.r();
-            ru_y = ru_y * scale.i();
-        }
-        if let Some(angle) = t.rotate {
-            let cos = angle.cos();
-            let sin = angle.sin();
-            let new_x = ru_x * cos - ru_y * sin;
-            let new_y = ru_x * sin + ru_y * cos;
-            ru_x = new_x;
-            ru_y = new_y;
-        }
-        if let Some(origin) = t.origin {
-            ru_x = ru_x + origin.r();
-            ru_y = ru_y + origin.i();
-        }
-        if let Some(translate) = t.translate {
-            ru_x = ru_x + translate.r();
-            ru_y = ru_y + translate.i();
-        }
-
-        CircleF4E4::from((ru_x, ru_y))
-    }
+fn c44(x: f64, y: f64) -> CircleF4E4 {
+    CircleF4E4::from((x, y))
 }
 
 /// Extract a VSF colour as a fluor-native α+darkness pixel (`0xααRRGGBB`, RGB = 255−visible).

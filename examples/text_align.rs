@@ -9,10 +9,10 @@
 //! A thin vertical guide line of rects marks the three anchor X positions.
 
 use spirix::{CircleF4E4, ScalarF4E4};
-use toka::builder::Program;
+use toka::builder::{filled_box, Program};
 use toka::capsule::CapsuleBuilder;
 use vsf::handle;
-use vsf::types::{Fill, VsfType};
+use vsf::types::VsfType;
 
 const FONT: &[u8] = include_bytes!("/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf");
 
@@ -20,36 +20,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let half = ScalarF4E4::from_f32(0.5);
 
     // Grey box: 1.0 RU wide × 0.5 RU tall, centered at origin
-    let grey_box = VsfType::rob(
+    let grey_box = filled_box(
         CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::ZERO)),
         CircleF4E4::from((ScalarF4E4::ONE, half)),
-        Fill::Solid(Box::new(VsfType::ra([60, 60, 60, 255]))),
-        None,
-        vec![],
+        VsfType::ra([60, 60, 60, 255]),
     );
 
     // Thin vertical guide at x=0 (center anchor)
-    let guide_center = VsfType::rob(
+    let guide_center = filled_box(
         CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::ZERO)),
         CircleF4E4::from((ScalarF4E4::from_f32(0.005), half)),
-        Fill::Solid(Box::new(VsfType::ra([255, 255, 255, 80]))),
-        None, vec![],
+        VsfType::ra([255, 255, 255, 80]),
     );
 
     // Guide at x=+0.5 (right edge)
-    let guide_right = VsfType::rob(
+    let guide_right = filled_box(
         CircleF4E4::from((half, ScalarF4E4::ZERO)),
         CircleF4E4::from((ScalarF4E4::from_f32(0.005), half)),
-        Fill::Solid(Box::new(VsfType::ra([0, 220, 220, 80]))),
-        None, vec![],
+        VsfType::ra([0, 220, 220, 80]),
     );
 
     // Guide at x=-0.5 (left edge)
-    let guide_left = VsfType::rob(
+    let guide_left = filled_box(
         CircleF4E4::from((-half, ScalarF4E4::ZERO)),
         CircleF4E4::from((ScalarF4E4::from_f32(0.005), half)),
-        Fill::Solid(Box::new(VsfType::ra([220, 220, 0, 80]))),
-        None, vec![],
+        VsfType::ra([220, 220, 0, 80]),
     );
 
     let bytecode = Program::new()

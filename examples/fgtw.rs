@@ -4,10 +4,10 @@
 //! Exercises: text alignment, word wrapping, rectangles, circles, lines, multiple sizes.
 
 use spirix::{CircleF4E4, ScalarF4E4};
-use toka::builder::Program;
+use toka::builder::{filled_box, filled_circle, Program};
 use toka::capsule::CapsuleBuilder;
 use vsf::handle;
-use vsf::types::{Fill, VsfType};
+use vsf::types::VsfType;
 
 const FONT: &[u8] = include_bytes!("/usr/share/fonts/adwaita-mono-fonts/AdwaitaMono-Regular.ttf");
 
@@ -20,20 +20,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dim_green = VsfType::ra([76, 175, 80, 40]);      // status bg
 
     // Status indicator box
-    let status_bg = VsfType::rob(
+    let status_bg = filled_box(
         CircleF4E4::from((ScalarF4E4::ZERO, ScalarF4E4::from_f32(0.15))),
         CircleF4E4::from((ScalarF4E4::from_f32(0.6), ScalarF4E4::from_f32(0.08))),
-        Fill::Solid(Box::new(dim_green.clone())),
-        None,
-        vec![],
+        dim_green.clone(),
     );
 
     // Status dot (small green circle)
-    let status_dot = VsfType::roc(
+    let status_dot = filled_circle(
         CircleF4E4::from((ScalarF4E4::from_f32(-0.2), ScalarF4E4::from_f32(0.15))),
         ScalarF4E4::from_f32(0.015),
-        Fill::Solid(Box::new(green.clone())),
-        None,
+        green.clone(),
     );
 
     let bytecode = Program::new()

@@ -864,7 +864,7 @@ impl VM {
 
             // ==================== SCENE GRAPH CONSTRUCTION ====================
             Opcode::build_row => {
-                // Build row: pop children (ron), rotate (s44), translate (c44)
+                // Build a node that moves its children: pop children (ron), rotate (s44, turns), translate (c44)
                 // Stack: [..., translate_c44, rotate_s44, children_ron]
                 let children_vsf = self.pop()?;
                 let rotate_vsf = self.pop()?;
@@ -872,30 +872,17 @@ impl VM {
 
                 let translate = Self::extract_c44(&translate_vsf)?;
                 let rotate = Self::extract_s44(&rotate_vsf)?;
+                let children = Self::node_children(children_vsf, "build_row")?;
 
-                // Extract children from ron node
-                let children = match children_vsf {
-                    VsfType::ron(_, _, children_vec) => children_vec,
-                    _ => {
-                        return Err(format!(
-                            "build_row: expected ron for children, got {:?}",
-                            type_name(&children_vsf)
-                        ))
-                    }
-                };
-
-                let transform = vsf::types::Transform {
-                    translate: Some(translate),
-                    rotate: Some(rotate),
-                    scale: None,
-                    origin: None,
-                };
-
-                self.stack.push(VsfType::row(transform, children));
+                let mut node = vsf::types::Node::new();
+                node.translate = Some(s44_nums(vec![2], vec![translate.r(), translate.i()])?);
+                node.rotation = Some(vsf::types::Num::from(rotate));
+                node.children = children;
+                self.stack.push(VsfType::ron(Box::new(node)));
             }
 
             Opcode::build_rob => {
-                // Build rob: pop children (ron), fill (colour), size (c44), pos (c44)
+                // Build a box: pop children (ron), fill (colour), size (c44, full width and height), pos (c44, centre)
                 // Stack: [..., pos_c44, size_c44, fill_colour, children_ron]
                 let children_vsf = self.pop()?;
                 let fill_vsf = self.pop()?;
@@ -904,27 +891,31 @@ impl VM {
 
                 let pos = Self::extract_c44(&pos_vsf)?;
                 let size = Self::extract_c44(&size_vsf)?;
+                let children = Self::node_children(children_vsf, "build_rob")?;
 
-                // Extract children from ron node
-                let children = match children_vsf {
-                    VsfType::ron(_, _, children_vec) => children_vec,
-                    _ => {
-                        return Err(format!(
-                            "build_rob: expected ron for children, got {:?}",
-                            type_name(&children_vsf)
-                        ))
-                    }
+                let half = ScalarF4E4::from(0.5);
+                let rect = vsf::types::Rect {
+                    geometry: s44_nums(vec![2, 2], vec![pos.r(), pos.i(), size.r() * half, size.i() * half])?,
+                    rotation: None,
+                    corners: None,
+                    exponent: None,
+                    fill: Some(vsf::types::Paint::colour(fill_vsf).map_err(|e| format!("build_rob: {e}"))?),
+                    stroke: None,
                 };
-
-                // Build simple solid fill from colour
-                let fill = vsf::types::Fill::Solid(Box::new(fill_vsf));
-
-                self.stack
-                    .push(VsfType::rob(pos, size, fill, None, children));
+                let rob = VsfType::rob(Box::new(rect));
+                // A box's children draw over it: a node holding the box first, then the children (painter's order).
+                if children.is_empty() {
+                    self.stack.push(rob);
+                } else {
+                    let mut node = vsf::types::Node::new();
+                    node.children.push(rob);
+                    node.children.extend(children);
+                    self.stack.push(VsfType::ron(Box::new(node)));
+                }
             }
 
             Opcode::build_roc => {
-                // Build roc: pop fill (colour), radius (s44), center (c44)
+                // Build a circle (an roe with equal radii): pop fill (colour), radius (s44), center (c44)
                 // Stack: [..., center_c44, radius_s44, fill_colour]
                 let fill_vsf = self.pop()?;
                 let radius_vsf = self.pop()?;
@@ -933,10 +924,15 @@ impl VM {
                 let center = Self::extract_c44(&center_vsf)?;
                 let radius = Self::extract_s44(&radius_vsf)?;
 
-                // Build simple solid fill from colour
-                let fill = vsf::types::Fill::Solid(Box::new(fill_vsf));
-
-                self.stack.push(VsfType::roc(center, radius, fill, None));
+                let circle = vsf::types::Ellipse {
+                    geometry: s44_nums(vec![2, 2], vec![center.r(), center.i(), radius, radius])?,
+                    rotation: None,
+                    start: None,
+                    sweep: None,
+                    fill: Some(vsf::types::Paint::colour(fill_vsf).map_err(|e| format!("build_roc: {e}"))?),
+                    stroke: None,
+                };
+                self.stack.push(VsfType::roe(Box::new(circle)));
             }
 
             Opcode::build_transform => {
@@ -1303,7 +1299,7 @@ impl VM {
                                             };
                                             CellContent::Styled(text, colour, size_override)
                                         }
-                                        VsfType::rou(_pos, _size, label, _variant, colour) => {
+                                        VsfType::rou(button) => {
                                             // Button cell: drawable carries label + colour
                                             // Pop action_url, then id from stack
                                             let action_url = match self.pop()? {
@@ -1321,9 +1317,9 @@ impl VM {
                                                     "draw_table: button cell expected u for id, got {:?}", other
                                                 )),
                                             };
-                                            CellContent::Button { label, colour: *colour, id, action_url }
+                                            CellContent::Button { label: cell_text(&button.label)?, colour: paint_colour(&button.paint)?, id, action_url }
                                         }
-                                        VsfType::roq(_pos, _size, placeholder, colour) => {
+                                        VsfType::roq(input) => {
                                             // TextInput cell: drawable carries placeholder + colour
                                             // Pop id from stack
                                             let id = match self.pop()? {
@@ -1333,10 +1329,12 @@ impl VM {
                                                     "draw_table: text_input cell expected u for id, got {:?}", other
                                                 )),
                                             };
-                                            CellContent::TextInput { placeholder, colour: *colour, id }
+                                            CellContent::TextInput { placeholder: cell_text(&input.placeholder)?, colour: paint_colour(&input.paint)?, id }
                                         }
-                                        VsfType::roa(sub_cols, sub_rows, children) => {
+                                        VsfType::roa(grid) => {
                                             // SubTable cell: one child per cell, then settings tags
+                                            let (sub_cols, sub_rows) = (grid_count(&grid.cols)?, grid_count(&grid.rows)?);
+                                            let children = &grid.children;
                                             let cell_count = sub_cols * sub_rows;
                                             let mut sub_cells = Vec::with_capacity(cell_count);
                                             let mut sub_settings = TableSettings::default();
@@ -1369,7 +1367,7 @@ impl VM {
                                                             sub_cells.push(CellContent::Text(s.clone()));
                                                         }
                                                     }
-                                                    VsfType::rou(_, _, label, _variant, colour) => {
+                                                    VsfType::rou(button) => {
                                                         // Button: next children are id (u5) and action_url (l)
                                                         let id = if ci + 1 < children.len() {
                                                             ci += 1;
@@ -1390,13 +1388,13 @@ impl VM {
                                                             }
                                                         } else { None };
                                                         sub_cells.push(CellContent::Button {
-                                                            label: label.clone(),
-                                                            colour: *colour.clone(),
+                                                            label: cell_text(&button.label)?,
+                                                            colour: paint_colour(&button.paint)?,
                                                             id,
                                                             action_url,
                                                         });
                                                     }
-                                                    VsfType::roq(_, _, placeholder, colour) => {
+                                                    VsfType::roq(input) => {
                                                         // TextInput: next child is id (u5)
                                                         let id = if ci + 1 < children.len() {
                                                             ci += 1;
@@ -1408,8 +1406,8 @@ impl VM {
                                                             }
                                                         } else { 0 };
                                                         sub_cells.push(CellContent::TextInput {
-                                                            placeholder: placeholder.clone(),
-                                                            colour: *colour.clone(),
+                                                            placeholder: cell_text(&input.placeholder)?,
+                                                            colour: paint_colour(&input.paint)?,
                                                             id,
                                                         });
                                                     }
@@ -2249,6 +2247,14 @@ impl VM {
         match vsf {
             VsfType::c44(c) => Ok(*c),
             _ => Err(format!("Expected c44, got {:?}", type_name(vsf))),
+        }
+    }
+
+    /// The children of a `ron` node popped as an opcode's child list.
+    fn node_children(vsf: VsfType, op: &str) -> Result<Vec<VsfType>, String> {
+        match vsf {
+            VsfType::ron(node) => Ok(node.children),
+            other => Err(format!("{op}: expected ron for children, got {:?}", type_name(&other))),
         }
     }
 
@@ -3770,4 +3776,30 @@ mod tests {
             _ => panic!("Expected s44"),
         }
     }
+}
+
+/// Spirix values as a VSF number tensor of the given shape.
+fn s44_nums(shape: Vec<usize>, data: Vec<ScalarF4E4>) -> Result<vsf::types::Nums, String> {
+    vsf::types::Nums::new(VsfType::t_s44(vsf::Tensor::try_new(shape, data)?))
+}
+
+/// The words of a text value (`x` or `a`) in a table cell.
+fn cell_text(v: &VsfType) -> Result<String, String> {
+    match v {
+        VsfType::x(s) | VsfType::a(s) => Ok(s.clone()),
+        other => Err(format!("table cell: expected text, got {:?}", type_name(other))),
+    }
+}
+
+/// A cell's colour: toka draws solid paint only.
+fn paint_colour(p: &vsf::types::Paint) -> Result<VsfType, String> {
+    match p {
+        vsf::types::Paint::Colour(c) => Ok((**c).clone()),
+        vsf::types::Paint::Gradient(_) => Err("table cell: gradient paint not implemented yet".to_string()),
+    }
+}
+
+/// A grid's column or row count.
+fn grid_count(n: &vsf::types::Num) -> Result<usize, String> {
+    n.as_u64().and_then(|c| usize::try_from(c).ok()).ok_or_else(|| "table: grid count is not an unsigned integer that fits usize".to_string())
 }
