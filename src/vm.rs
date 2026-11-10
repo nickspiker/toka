@@ -1042,7 +1042,8 @@ impl VM {
                 let colour = next;
 
                 let text = match self.pop()? {
-                    VsfType::x(s) | VsfType::a(s) => s,
+                    VsfType::x(s) => s,
+                    VsfType::a(s) => s.into_string(),
                     other => {
                         return Err(format!(
                             "draw_text: expected string for text, got {:?}",
@@ -1099,7 +1100,8 @@ impl VM {
                     }
                 };
                 let key = match self.pop()? {
-                    VsfType::x(s) | VsfType::a(s) => s,
+                    VsfType::x(s) => s,
+                    VsfType::a(s) => s.into_string(),
                     other => {
                         return Err(format!("draw_image: expected string for key, got {:?}", other))
                     }
@@ -1274,7 +1276,8 @@ impl VM {
                                 cells = Vec::with_capacity(count);
                                 for _ in 0..count {
                                     let cell = match self.pop()? {
-                                        VsfType::x(s) | VsfType::a(s) => CellContent::Text(s),
+                                        VsfType::x(s) => CellContent::Text(s),
+                                        VsfType::a(s) => CellContent::Text(s.into_string()),
                                         VsfType::v(b'i', bytes) => {
                                             // Image cell: v-wrapped 'i' carries the resource key (UTF-8).
                                             CellContent::Image(String::from_utf8_lossy(&bytes).into_owned())
@@ -1285,14 +1288,16 @@ impl VM {
                                             let (size_override, text) = match next {
                                                 VsfType::s44(s) => {
                                                     let t = match self.pop()? {
-                                                        VsfType::x(s) | VsfType::a(s) => s,
+                                                        VsfType::x(s) => s,
+                                                        VsfType::a(s) => s.into_string(),
                                                         other => return Err(format!(
                                                             "draw_table: styled cell expected string after size, got {:?}", other
                                                         )),
                                                     };
                                                     (Some(s), t)
                                                 }
-                                                VsfType::x(s) | VsfType::a(s) => (None, s),
+                                                VsfType::x(s) => (None, s),
+                                                VsfType::a(s) => (None, s.into_string()),
                                                 other => return Err(format!(
                                                     "draw_table: styled cell expected string or s44, got {:?}", other
                                                 )),
@@ -1303,9 +1308,8 @@ impl VM {
                                             // Button cell: drawable carries label + colour
                                             // Pop action_url, then id from stack
                                             let action_url = match self.pop()? {
-                                                VsfType::x(s) | VsfType::a(s) => {
-                                                    if s.is_empty() { None } else { Some(s) }
-                                                }
+                                                VsfType::x(s) => if s.is_empty() { None } else { Some(s) },
+                                                VsfType::a(s) => if s.is_empty() { None } else { Some(s.into_string()) },
                                                 other => return Err(format!(
                                                     "draw_table: button cell expected string for action_url, got {:?}", other
                                                 )),
@@ -1342,7 +1346,8 @@ impl VM {
                                             // First cell_count children are cell data (1 entry per cell)
                                             while ci < children.len() && sub_cells.len() < cell_count {
                                                 match &children[ci] {
-                                                    VsfType::x(s) | VsfType::a(s) => {
+                                                    v @ (VsfType::x(_) | VsfType::a(_)) => {
+                                                        let s = cell_text(v)?;
                                                         // Could be plain text, or text followed by optional s44 + ra (styled)
                                                         // Peek ahead: if next child is s44 or ra, it's styled
                                                         let mut size_override = None;
@@ -1362,9 +1367,9 @@ impl VM {
                                                         }
                                                         if colour_override.is_some() {
                                                             // Advance past size too (ci already at colour)
-                                                            sub_cells.push(CellContent::Styled(s.clone(), colour_override.unwrap(), size_override));
+                                                            sub_cells.push(CellContent::Styled(s, colour_override.unwrap(), size_override));
                                                         } else {
-                                                            sub_cells.push(CellContent::Text(s.clone()));
+                                                            sub_cells.push(CellContent::Text(s));
                                                         }
                                                     }
                                                     VsfType::rou(button) => {
@@ -1381,9 +1386,8 @@ impl VM {
                                                         let action_url = if ci + 1 < children.len() {
                                                             ci += 1;
                                                             match &children[ci] {
-                                                                VsfType::x(s) | VsfType::a(s) => {
-                                                                    if s.is_empty() { None } else { Some(s.clone()) }
-                                                                }
+                                                                VsfType::x(s) => if s.is_empty() { None } else { Some(s.clone()) },
+                                                                VsfType::a(s) => if s.is_empty() { None } else { Some(s.to_string()) },
                                                                 _ => None,
                                                             }
                                                         } else { None };
@@ -1446,8 +1450,8 @@ impl VM {
                                                         }
                                                         "j" => {
                                                             if ci < children.len() {
-                                                                if let VsfType::x(s) | VsfType::a(s) = &children[ci] {
-                                                                    sub_settings.h_align = Some(s.bytes().collect());
+                                                                if let v @ (VsfType::x(_) | VsfType::a(_)) = &children[ci] {
+                                                                    sub_settings.h_align = Some(cell_text(v)?.into_bytes());
                                                                     ci += 1;
                                                                 }
                                                             }
@@ -1627,9 +1631,8 @@ impl VM {
                             }
                             "j" => {
                                 match self.pop()? {
-                                    VsfType::x(s) | VsfType::a(s) => {
-                                        settings.h_align = Some(s.into_bytes())
-                                    }
+                                    VsfType::x(s) => settings.h_align = Some(s.into_bytes()),
+                                    VsfType::a(s) => settings.h_align = Some(s.as_bytes().to_vec()),
                                     other => {
                                         return Err(format!(
                                             "draw_table: 'j' tag expected string, got {:?}",
@@ -1641,9 +1644,8 @@ impl VM {
                             }
                             "v" => {
                                 match self.pop()? {
-                                    VsfType::x(s) | VsfType::a(s) => {
-                                        settings.v_align = Some(s.into_bytes())
-                                    }
+                                    VsfType::x(s) => settings.v_align = Some(s.into_bytes()),
+                                    VsfType::a(s) => settings.v_align = Some(s.as_bytes().to_vec()),
                                     other => {
                                         return Err(format!(
                                             "draw_table: 'v' tag expected string, got {:?}",
@@ -1841,7 +1843,8 @@ impl VM {
                 };
                 let colour = self.pop()?;
                 let label = match self.pop()? {
-                    VsfType::x(s) | VsfType::a(s) => s,
+                    VsfType::x(s) => s,
+                    VsfType::a(s) => s.into_string(),
                     other => {
                         return Err(format!(
                             "button: expected string for label, got {:?}",
@@ -1908,7 +1911,8 @@ impl VM {
                 };
                 let colour = self.pop()?;
                 let placeholder = match self.pop()? {
-                    VsfType::x(s) | VsfType::a(s) => s,
+                    VsfType::x(s) => s,
+                    VsfType::a(s) => s.into_string(),
                     other => {
                         return Err(format!(
                             "text_input: expected string for placeholder, got {:?}",
@@ -2076,7 +2080,8 @@ impl VM {
                 // Pop URL (string), pop condition (s44/u)
                 // If condition is non-zero, queue the URL for JS to execute as POST
                 let url = match self.pop()? {
-                    VsfType::x(s) | VsfType::a(s) => s,
+                    VsfType::x(s) => s,
+                    VsfType::a(s) => s.into_string(),
                     other => {
                         return Err(format!("action: expected string for URL, got {:?}", other))
                     }
@@ -2098,11 +2103,13 @@ impl VM {
                 let b = self.pop()?;
                 let a = self.pop()?;
                 let sa = match &a {
-                    VsfType::x(s) | VsfType::a(s) => s.as_str(),
+                    VsfType::x(s) => s.as_str(),
+                    VsfType::a(s) => s.as_str(),
                     _ => return Err(format!("string_concat: expected string for a, got {:?}", type_name(&a))),
                 };
                 let sb = match &b {
-                    VsfType::x(s) | VsfType::a(s) => s.as_str(),
+                    VsfType::x(s) => s.as_str(),
+                    VsfType::a(s) => s.as_str(),
                     _ => return Err(format!("string_concat: expected string for b, got {:?}", type_name(&b))),
                 };
                 let mut result = String::with_capacity(sa.len() + sb.len());
@@ -3786,7 +3793,8 @@ fn s44_nums(shape: Vec<usize>, data: Vec<ScalarF4E4>) -> Result<vsf::types::Nums
 /// The words of a text value (`x` or `a`) in a table cell.
 fn cell_text(v: &VsfType) -> Result<String, String> {
     match v {
-        VsfType::x(s) | VsfType::a(s) => Ok(s.clone()),
+        VsfType::x(s) => Ok(s.clone()),
+        VsfType::a(s) => Ok(s.to_string()),
         other => Err(format!("table cell: expected text, got {:?}", type_name(other))),
     }
 }

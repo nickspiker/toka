@@ -132,7 +132,7 @@ mod tests {
         bytecode.extend(VsfType::u3(42).flatten());
 
         bytecode.extend(VsfType::op(b'p', b's').flatten());
-        bytecode.extend(VsfType::a("hello".to_string()).flatten());
+        bytecode.extend(VsfType::a(vsf::Ascii::lit("hello")).flatten());
 
         bytecode.extend(VsfType::op(b'h', b'l').flatten());
 

@@ -193,11 +193,13 @@ pub mod wasm {
 
         /// Build the VSF-framed request the host POSTs to the worker for one resource `key`. VSF construction stays in wasm so the host only shuttles opaque bytes over the wire.
         pub fn build_resource_request(&self, key: &str) -> Vec<u8> {
+            // A key that is not ASCII cannot be an `a`: no request, the same empty answer as a failed build.
+            let Ok(key) = vsf::Ascii::new(key) else { return Vec::new() };
             vsf::vsf_builder::VsfBuilder::new()
                 .provenance_only()
                 .add_section(
                     "resource_get",
-                    vec![("key".to_string(), vsf::types::VsfType::a(key.to_string()))],
+                    vec![("key".to_string(), vsf::types::VsfType::a(key))],
                 )
                 .build()
                 .unwrap_or_default()
